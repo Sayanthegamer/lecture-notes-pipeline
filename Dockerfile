@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code
 COPY pipeline.py .
 COPY main.py .
+COPY frontend ./frontend
 
 # Expose port 10000 (Render uses the $PORT env variable, which we will bind to in main.py)
 EXPOSE 10000
