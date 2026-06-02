@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lecture Study Notes Generator</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Marked.js for Markdown parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    
+    <!-- MathJax for LaTeX equations -->
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']],
+                processEscapes: true
+            },
+            options: {
+                ignoreHtmlClass: 'tex2jax_ignore',
+                processHtmlClass: 'tex2jax_process'
+            }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    
+    <!-- Stylesheet -->
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Configuration Header (Collapsed by default) -->
+        <header class="config-header">
+            <div class="logo">
+                <span class="logo-icon">📚</span>
+                <h1>Lecture Notes Scribe</h1>
+            </div>
+            <div class="api-config">
+                <label for="backend-url">Backend API:</label>
+                <input type="text" id="backend-url" placeholder="https://your-app.onrender.com/" value="">
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="workspace">
+            <!-- Left Panel: Input & Control -->
+            <section class="input-panel card">
+                <h2>Generate New Textbook Notes</h2>
+                <p class="description">Enter a YouTube video URL or a local file path to start compiling detailed, textbook-quality classroom notes.</p>
+                
+                <form id="generator-form">
+                    <div class="form-group">
+                        <label for="lecture-url">YouTube URL / Video Path:</label>
+                        <input type="text" id="lecture-url" placeholder="https://www.youtube.com/watch?v=..." required>
+                    </div>
+                    <button type="submit" id="submit-btn" class="primary-btn">
+                        <span class="btn-text">Generate Study Guide</span>
+                        <span class="spinner hidden"></span>
+                    </button>
+                </form>
+
+                <!-- Processing Progress State -->
+                <div id="progress-container" class="progress-container hidden">
+                    <div class="progress-header">
+                        <span id="status-message">Extracting video...</span>
+                        <span id="progress-percent">0%</span>
+                    </div>
+                    <div class="progress-bar-bg">
+                        <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%"></div>
+                    </div>
+                    <p class="cooldown-notice">Note: Large lectures run in chunk segments. This can take several minutes. Keep this tab open.</p>
+                </div>
+            </section>
+
+            <!-- Right Panel: Output & Reader View -->
+            <section class="output-panel card">
+                <div class="output-header">
+                    <h2>Compiled Study Guide</h2>
+                    <div class="actions hidden" id="output-actions">
+                        <button id="copy-md-btn" class="secondary-btn">Copy Markdown</button>
+                        <button id="print-btn" class="primary-btn">Print / Export PDF</button>
+                    </div>
+                </div>
+                
+                <div id="output-placeholder" class="output-placeholder">
+                    <div class="placeholder-content">
+                        <span class="placeholder-icon">📖</span>
+                        <p>Your compiled study guide with LaTeX math equations, definitions, and whiteboard drawings will appear here.</p>
+                    </div>
+                </div>
+
+                <div id="output-content" class="output-content tex2jax_process hidden">
+                    <!-- Dynamic rendered HTML content goes here -->
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- JavaScript logic -->
+    <script src="index.js"></script>
+</body>
+</html>

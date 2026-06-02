@@ -25,6 +25,7 @@ notes_media/
 
 # Generated Notes / Captions
 *.html
+!frontend/index.html
 *.vtt
 *.srt
 lecture_notes.md
