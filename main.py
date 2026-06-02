@@ -27,8 +27,9 @@ jobs = {}
 
 class JobRequest(BaseModel):
     url: str
+    cookies: str = None
 
-def run_pipeline_task(job_id: str, url: str, base_url: str):
+def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = None):
     jobs[job_id] = {
         "status": "processing",
         "progress": 10,
@@ -37,70 +38,82 @@ def run_pipeline_task(job_id: str, url: str, base_url: str):
         "html": None,
     }
     
+    cookies_file = f"cookies_{job_id}.txt" if cookies_text else None
+    
     try:
-        # 1. Download YouTube video
-        vid_file = pipeline.download_youtube_video(url)
-        if not vid_file:
-            raise Exception("YouTube video download failed.")
+        try:
+            # Write cookies if provided
+            if cookies_file and cookies_text:
+                with open(cookies_file, "w", encoding="utf-8") as f:
+                    f.write(cookies_text)
+                    
+            # 1. Download YouTube video
+            vid_file = pipeline.download_youtube_video(url, cookies_file=cookies_file)
+            if not vid_file:
+                raise Exception("YouTube video download failed.")
+                
+            jobs[job_id]["progress"] = 30
+            jobs[job_id]["message"] = "Extracting keyframes and audio slices..."
             
-        jobs[job_id]["progress"] = 30
-        jobs[job_id]["message"] = "Extracting keyframes and audio slices..."
-        
-        # Output filenames
-        output_md = f"notes_{job_id}.md"
-        output_html = f"notes_{job_id}.html"
-        
-        # 2. Run the main processing pipeline
-        pipeline.run_pipeline(vid_file, output_md, threshold=0.10, cooldown_seconds=30)
-        
-        # 3. Read generated output files
-        if os.path.exists(output_md):
-            with open(output_md, "r", encoding="utf-8") as f:
-                md_text = f.read()
-        else:
-            raise Exception("Notes generation failed (Markdown not found).")
+            # Output filenames
+            output_md = f"notes_{job_id}.md"
+            output_html = f"notes_{job_id}.html"
             
-        if os.path.exists(output_html):
-            with open(output_html, "r", encoding="utf-8") as f:
-                html_text = f.read()
-        else:
-            html_text = ""
+            # 2. Run the main processing pipeline
+            pipeline.run_pipeline(vid_file, output_md, threshold=0.10, cooldown_seconds=30)
             
-        # 4. Rewrite relative image paths to point to Render's absolute static url
-        # Converts "./notes_media/frame_xxx.jpg" to "https://your-app.onrender.com/notes_media/frame_xxx.jpg"
-        backend_media_url = f"{base_url}notes_media/"
-        if md_text:
-            md_text = md_text.replace("./notes_media/", backend_media_url)
-        if html_text:
-            html_text = html_text.replace("./notes_media/", backend_media_url)
+            # 3. Read generated output files
+            if os.path.exists(output_md):
+                with open(output_md, "r", encoding="utf-8") as f:
+                    md_text = f.read()
+            else:
+                raise Exception("Notes generation failed (Markdown not found).")
+                
+            if os.path.exists(output_html):
+                with open(output_html, "r", encoding="utf-8") as f:
+                    html_text = f.read()
+            else:
+                html_text = ""
+                
+            # 4. Rewrite relative image paths to point to Render's absolute static url
+            backend_media_url = f"{base_url}notes_media/"
+            if md_text:
+                md_text = md_text.replace("./notes_media/", backend_media_url)
+            if html_text:
+                html_text = html_text.replace("./notes_media/", backend_media_url)
+                
+            jobs[job_id] = {
+                "status": "completed",
+                "progress": 100,
+                "message": "Notes successfully compiled!",
+                "markdown": md_text,
+                "html": html_text,
+            }
             
-        jobs[job_id] = {
-            "status": "completed",
-            "progress": 100,
-            "message": "Notes successfully compiled!",
-            "markdown": md_text,
-            "html": html_text,
-        }
-        
-        # Clean up temporary video file (images in notes_media persist to be served statically)
-        if os.path.exists(vid_file):
-            try: os.remove(vid_file)
+            # Clean up temporary video/markdown files
+            if os.path.exists(vid_file):
+                try: os.remove(vid_file)
+                except: pass
+            if os.path.exists(output_md):
+                try: os.remove(output_md)
+                except: pass
+            if os.path.exists(output_html):
+                try: os.remove(output_html)
+                except: pass
+                
+        except Exception as e:
+            jobs[job_id] = {
+                "status": "failed",
+                "progress": 100,
+                "message": f"Error: {str(e)}",
+                "markdown": None,
+                "html": None,
+            }
+    finally:
+        # Secure cleanup of temporary cookies file
+        if cookies_file and os.path.exists(cookies_file):
+            try: os.remove(cookies_file)
             except: pass
-        if os.path.exists(output_md):
-            try: os.remove(output_md)
-            except: pass
-        if os.path.exists(output_html):
-            try: os.remove(output_html)
-            except: pass
-            
-    except Exception as e:
-        jobs[job_id] = {
-            "status": "failed",
-            "progress": 100,
-            "message": f"Error: {str(e)}",
-            "markdown": None,
-            "html": None,
-        }
 
 @app.post("/api/generate")
 def generate_notes(request: JobRequest, background_tasks: BackgroundTasks, fastapi_req: Request):
@@ -109,7 +122,7 @@ def generate_notes(request: JobRequest, background_tasks: BackgroundTasks, fasta
     base_url = str(fastapi_req.base_url)
     
     # Start the pipeline as a background thread task
-    background_tasks.add_task(run_pipeline_task, job_id, request.url, base_url)
+    background_tasks.add_task(run_pipeline_task, job_id, request.url, base_url, request.cookies)
     
     return {"job_id": job_id}
 

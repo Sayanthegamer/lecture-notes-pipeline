@@ -145,7 +145,7 @@ def extract_audio_slice(video_path, audio_output_path, start_sec, duration_sec):
         return False
 
 
-def download_youtube_video(url):
+def download_youtube_video(url, cookies_file=None):
     """
     Downloads a video from YouTube using yt-dlp with a multi-step fallback mechanism
     to capture subtitles and bypass 429 rate limit blocks on both local machines and servers.
@@ -164,8 +164,14 @@ def download_youtube_video(url):
         "--merge-output-format", "mp4",
         "--remux-video", "mp4",
         "--remote-components", "ejs:github",
+        "--js-runtimes", "node",
         "-o", "lecture_video.%(ext)s"
     ]
+
+    # Prepend cookies file if provided
+    if cookies_file and os.path.exists(cookies_file):
+        print(f"Injecting session cookies from: {cookies_file}")
+        common_args = ["--cookies", cookies_file] + common_args
 
     # Subtitle download flags
     sub_args = [

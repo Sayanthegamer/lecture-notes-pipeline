@@ -2,6 +2,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const backendUrlInput = document.getElementById('backend-url');
     const generatorForm = document.getElementById('generator-form');
     const lectureUrlInput = document.getElementById('lecture-url');
+    const youtubeCookiesInput = document.getElementById('youtube-cookies');
     const submitBtn = document.getElementById('submit-btn');
     const spinner = submitBtn.querySelector('.spinner');
     const btnText = submitBtn.querySelector('.btn-text');
@@ -34,6 +35,12 @@ document.addEventListener('DOMContentLoaded', () => {
         backendUrlInput.value = currentOrigin;
     }
 
+    // Load saved YouTube cookies
+    const savedCookies = localStorage.getItem('notes_scribe_youtube_cookies');
+    if (savedCookies && youtubeCookiesInput) {
+        youtubeCookiesInput.value = savedCookies;
+    }
+
     // Save URL when changed
     backendUrlInput.addEventListener('change', () => {
         let url = backendUrlInput.value.trim();
@@ -43,6 +50,13 @@ document.addEventListener('DOMContentLoaded', () => {
         backendUrlInput.value = url;
         localStorage.setItem('notes_scribe_backend_url', url);
     });
+
+    // Save Cookies when changed
+    if (youtubeCookiesInput) {
+        youtubeCookiesInput.addEventListener('change', () => {
+            localStorage.setItem('notes_scribe_youtube_cookies', youtubeCookiesInput.value.trim());
+        });
+    }
 
     // Get cleaned base API url
     function getApiBase() {
@@ -68,6 +82,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const lectureUrl = lectureUrlInput.value.trim();
         if (!lectureUrl) return;
 
+        const youtubeCookies = youtubeCookiesInput ? youtubeCookiesInput.value.trim() : "";
+
         // Reset UI States
         submitBtn.disabled = true;
         spinner.classList.remove('hidden');
@@ -81,7 +97,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`${apiBase}api/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: lectureUrl })
+                body: JSON.stringify({ 
+                    url: lectureUrl,
+                    cookies: youtubeCookies || null
+                })
             });
 
             if (!response.ok) {
