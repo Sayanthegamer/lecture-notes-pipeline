@@ -487,6 +487,67 @@ body {
     }
 }
 
+/* Tablet & Mobile Responsiveness */
+@media (max-width: 768px) {
+    body {
+        padding: 10px;
+    }
+    
+    .config-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 15px;
+        padding: 15px;
+    }
+    
+    .api-config {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+    }
+    
+    .api-config input {
+        width: 100%;
+    }
+    
+    .card {
+        padding: 20px 15px;
+    }
+    
+    .output-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+    }
+    
+    .actions {
+        width: 100%;
+    }
+    
+    .actions button {
+        flex: 1;
+    }
+}
+
+@media (max-width: 480px) {
+    .logo h1 {
+        font-size: 1.2rem;
+    }
+    
+    .primary-btn, .secondary-btn {
+        padding: 10px 16px;
+        font-size: 0.9rem;
+    }
+    
+    .output-content h1 {
+        font-size: 1.5rem;
+    }
+    
+    .output-content h2 {
+        font-size: 1.2rem;
+    }
+}
+
 /* Print CSS override for PDF export */
 @media print {
     body {
