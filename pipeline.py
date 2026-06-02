@@ -825,6 +825,9 @@ def fetch_youtube_transcript_fallback(url):
     """
     Attempts to fetch the YouTube video transcript without downloading the video.
     Returns a formatted transcript string or None.
+    Supports a fallback chain:
+    1. Local python package (youtube-transcript-api)
+    2. Public youtube-transcript.ai API
     """
     video_id = extract_youtube_video_id(url)
     if not video_id:
@@ -832,32 +835,24 @@ def fetch_youtube_transcript_fallback(url):
         return None
         
     print(f"--- Attempting Transcript Fallback for video ID: {video_id} ---")
+    
+    # Method 1: Local youtube-transcript-api package
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         api = YouTubeTranscriptApi()
         
-        # Get list of available transcripts to see what languages exist
+        # Get list of available transcripts
         transcript_list = api.list(video_id)
         
-        # We prefer English first, then auto-generated English, then any other language (e.g. Hindi, Spanish, etc.)
+        # Priority languages
         languages = ['en', 'hi', 'es', 'fr', 'de', 'it', 'ja', 'ko', 'zh', 'pt', 'ru']
-        available_codes = []
-        for t in transcript_list:
-            available_codes.append(t.language_code)
-        
-        # Merge priorities
-        search_languages = [lang for lang in languages if lang in available_codes]
-        # Add remaining available codes
-        for code in available_codes:
-            if code not in search_languages:
-                search_languages.append(code)
-                
-        if not search_languages:
-            search_languages = ['en'] # default fallback
+        try:
+            transcript = transcript_list.find_transcript(languages)
+        except Exception:
+            # Fallback to the first available transcript
+            transcript = next(iter(transcript_list))
             
-        print(f"Searching transcripts with language priorities: {search_languages}")
-        res = api.fetch(video_id, languages=search_languages)
-        raw_data = res.to_raw_data()
+        raw_data = transcript.fetch()
         
         formatted_lines = []
         for entry in raw_data:
@@ -865,11 +860,30 @@ def fetch_youtube_transcript_fallback(url):
             formatted_lines.append(f"[{start_time}] {entry['text']}")
             
         transcript_str = "\n".join(formatted_lines)
-        print(f"Successfully retrieved transcript fallback! (Lines: {len(raw_data)})")
+        print(f"Successfully retrieved transcript from local youtube-transcript-api package! (Lines: {len(raw_data)})")
         return transcript_str
     except Exception as e:
-        print(f"Transcript fallback failed: {e}")
-        return None
+        print(f"Local youtube-transcript-api package failed: {e}")
+        
+    # Method 2: Public youtube-transcript.ai API
+    print("Trying backup Method 2: Fetching from youtube-transcript.ai...")
+    try:
+        import urllib.request
+        api_url = f"https://youtube-transcript.ai/transcript/{video_id}.txt"
+        req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            content = response.read().decode('utf-8')
+            # Check if we got actual transcript contents
+            if "## Transcript" in content or len(content) > 100:
+                print(f"Successfully retrieved transcript from youtube-transcript.ai! (Chars: {len(content)})")
+                return content
+            else:
+                print("Received empty or invalid response from youtube-transcript.ai")
+    except Exception as e:
+        print(f"youtube-transcript.ai API failed: {e}")
+        
+    return None
+
 
 
 def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path):
