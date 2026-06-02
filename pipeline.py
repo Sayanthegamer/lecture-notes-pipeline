@@ -856,8 +856,8 @@ def fetch_youtube_transcript_fallback(url):
         
         formatted_lines = []
         for entry in raw_data:
-            start_time = format_time(entry['start'])
-            formatted_lines.append(f"[{start_time}] {entry['text']}")
+            start_time = format_time(entry.start)
+            formatted_lines.append(f"[{start_time}] {entry.text}")
             
         transcript_str = "\n".join(formatted_lines)
         print(f"Successfully retrieved transcript from local youtube-transcript-api package! (Lines: {len(raw_data)})")
@@ -883,15 +883,61 @@ def fetch_youtube_transcript_fallback(url):
         print(f"youtube-transcript.ai API failed: {e}")
         
     return None
+def chunk_transcript(transcript_text, chunk_duration_sec=600):
+    """
+    Parses timestamps inside the transcript text and splits it into chronological time-based chunks.
+    Works for [H:MM:SS], [MM:SS], [M:SS], etc. formats.
+    """
+    lines = transcript_text.split('\n')
+    chunks = []
+    current_chunk_lines = []
+    
+    # Matches patterns like [0:02], [10:15], [1:11:43], [01:23:45], etc.
+    ts_pattern = re.compile(r'\[((\d{1,2}:)?\d{1,2}:\d{2})\]')
+    
+    chunk_start_sec = 0.0
+    
+    for line in lines:
+        match = ts_pattern.search(line)
+        if match:
+            ts_str = match.group(1)
+            sec = timestamp_to_seconds(ts_str)
+            
+            # If the current line's timestamp exceeds the current chunk boundary
+            while sec >= chunk_start_sec + chunk_duration_sec:
+                if current_chunk_lines:
+                    chunks.append({
+                        "start_sec": chunk_start_sec,
+                        "end_sec": chunk_start_sec + chunk_duration_sec,
+                        "text": "\n".join(current_chunk_lines)
+                    })
+                    current_chunk_lines = []
+                chunk_start_sec += chunk_duration_sec
+                
+            current_chunk_lines.append(line)
+        else:
+            # If there's no timestamp (like headers), add to the current chunk
+            if current_chunk_lines or not chunks:
+                current_chunk_lines.append(line)
+                
+    # Add final chunk if there are remaining lines
+    if current_chunk_lines:
+        chunks.append({
+            "start_sec": chunk_start_sec,
+            "end_sec": chunk_start_sec + chunk_duration_sec,
+            "text": "\n".join(current_chunk_lines)
+        })
+        
+    return chunks
 
 
-
-def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path):
+def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path, chunk_duration_sec=600, rate_limit_delay=5):
     """
     Fallback pipeline that generates notes solely based on the retrieved transcript text.
-    Bypasses video downloads and works 100% on cloud servers (Render) without cookies.
+    Processes the transcript in chunks to generate exhaustive, detailed study notes
+    and bypasses model output limits.
     """
-    print(f"--- Fallback: Compiling notes from transcript text only ---")
+    print(f"--- Fallback: Compiling notes from transcript text only in {chunk_duration_sec // 60}-minute chunks ---")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         print("Error: GEMINI_API_KEY env variable is missing.")
@@ -899,57 +945,95 @@ def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path
         
     client = genai.Client(api_key=api_key)
     
+    # 1. Chunk the transcript
+    chunks = chunk_transcript(transcript_text, chunk_duration_sec=chunk_duration_sec)
+    if not chunks:
+        print("Error: No transcript chunks could be generated.")
+        return False
+        
+    print(f"Transcript split into {len(chunks)} segments for sequential processing.")
+    
     # Clean output file first
     with open(output_notes_path, "w", encoding="utf-8") as f:
         f.write(f"# Compiled Lecture Study Notes: {youtube_url}\n\n")
-        f.write(f"*Processed from YouTube transcript fallback (no local media downloads).*\n\n---\n\n")
+        f.write(f"*Processed from YouTube transcript fallback (no local media downloads) in chunks.*\n\n---\n\n")
         
     system_instruction = (
         "You are an elite academic instructor and expert scribe. Your goal is to produce "
-        "fully independent, self-contained, textbook-quality classroom study notes based on the provided transcript. "
+        "fully independent, self-contained, textbook-quality classroom study notes based on the provided transcript segment. "
         "The notes must be so detailed and clear that a student can read them, learn the topic, understand every concept, "
         "and replicate every mathematical derivation from scratch.\n\n"
         "Requirements:\n"
         "1. **Independent Readability**: Do not write high-level summaries or references to the transcript itself. Write full narrative "
-        "explanations. Define every physical setup, coordinate system, variable, constant, and physical term explicitly.\n"
-        "2. **Exhaustive Mathematics**: Replicate *every single mathematical step* discussed in the transcript. "
+        "explanations. Define every setup, variable, constant, and physical term explicitly.\n"
+        "2. **Exhaustive Mathematics**: Replicate *every single mathematical step* discussed or implied in the transcript. "
         "Do not skip steps. Show starting formulas, algebraic rearrangements, and final expressions.\n"
-        "3. **Capture Spoken Nuances**: Include the instructor's verbal examples, physical analogies, explanations of *why* steps are performed, "
+        "3. **Capture Spoken Nuances**: Include the instructor's verbal examples, analogies, explanations of *why* steps are performed, "
         "and warnings about common student mistakes. Use callout boxes (e.g. '> [!WARNING] Common Mistake: ...' or '> [!NOTE] Explanation: ...') for emphasis.\n"
         "4. **Format**: Render all math, equations, physical parameters, and chemical symbols in LaTeX ($...$ for inline, $$...$$ for blocks). "
         "Structure sections cleanly with Markdown headers, bullet points, numbered lists, and comparison tables."
     )
     
-    prompt = (
-        "Here is the complete chronological transcript of the lecture (each line starts with a timestamp):\n\n"
-        f"{transcript_text}\n\n"
-        "Please compile the complete, detailed study notes for this entire lecture following the system instructions."
-    )
-    
+    previous_context = ""
     model_name = "gemini-3.1-flash-lite"
-    print(f"Calling Gemini ({model_name}) with full transcript text...")
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[prompt],
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.1
-            )
+    
+    for i, chunk in enumerate(chunks, 1):
+        start_time_str = format_time(chunk["start_sec"])
+        end_time_str = format_time(chunk["end_sec"])
+        
+        print(f"\nProcessing transcript segment {i}/{len(chunks)}: {start_time_str} to {end_time_str}...")
+        
+        prompt = (
+            f"You are writing complete, independent study notes for the lecture segment from {start_time_str} to {end_time_str}.\n"
+            f"Below is the chronological transcript of this lecture segment:\n\n"
+            f"{chunk['text']}\n\n"
+            "Compile the complete, detailed study notes for this segment following the system instructions."
         )
         
-        with open(output_notes_path, "a", encoding="utf-8") as f:
-            f.write(response.text if response.text else "No content generated.")
+        if previous_context:
+            prompt += (
+                f"\n\nHere is the tail end of the previous segment's notes for reference. "
+                "Ensure smooth transitions, continuous flow, and consistent mathematical notation:\n"
+                f"...\n{previous_context}\n"
+            )
             
-        print(f"Notes compiled successfully from transcript!")
-        
-        # Compile HTML companion notes
-        html_notes_path = os.path.splitext(output_notes_path)[0] + ".html"
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[prompt],
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.1
+                )
+            )
+            
+            cleaned_text = response.text if response.text else ""
+            previous_context = cleaned_text[-2000:] if cleaned_text else ""
+            
+            # Write to output notes file
+            with open(output_notes_path, "a", encoding="utf-8") as f:
+                f.write(f"## Segment: {start_time_str} - {end_time_str}\n\n")
+                f.write(cleaned_text)
+                f.write("\n\n---\n\n")
+                
+            print(f"Notes for segment {i} written successfully.")
+            
+        except Exception as e:
+            print(f"API generation failed for segment {i}: {e}")
+            
+        # Rate limit cooldown delay
+        if i < len(chunks):
+            print(f"Sleeping for {rate_limit_delay} seconds to stay under token rate limits...")
+            time.sleep(rate_limit_delay)
+            
+    # Compile HTML companion notes
+    html_notes_path = os.path.splitext(output_notes_path)[0] + ".html"
+    try:
         compile_markdown_to_html(output_notes_path, html_notes_path)
-        return True
     except Exception as e:
-        print(f"Gemini transcript notes generation failed: {e}")
-        return False
+        print(f"Warning: Failed to compile HTML textbook preview: {e}")
+        
+    return True
 
 
 if __name__ == "__main__":
