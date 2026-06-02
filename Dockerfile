@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
     curl \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Deno (required by yt-dlp to solve JavaScript signature challenges and run TV client bypasses)
