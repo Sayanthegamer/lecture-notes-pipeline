@@ -164,7 +164,6 @@ def download_youtube_video(url, cookies_file=None):
         "--merge-output-format", "mp4",
         "--remux-video", "mp4",
         "--remote-components", "ejs:github",
-        "--js-runtimes", "node",
         "-o", "lecture_video.%(ext)s"
     ]
 

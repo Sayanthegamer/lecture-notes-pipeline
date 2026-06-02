@@ -6,8 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
     curl \
-    nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Deno (required by yt-dlp to solve JavaScript signature challenges and run TV client bypasses)
+RUN curl -fsSL https://deno.land/x/install/install.sh | sh && \
+    mv /root/.deno/bin/deno /usr/local/bin/deno
 
 # Set the working directory in the container
 WORKDIR /app
