@@ -1,5 +1,8 @@
-# Use an official Python runtime as a parent image
 FROM python:3.11-slim
+
+# Prevent Python from buffering stdout and stderr
+ENV PYTHONUNBUFFERED=1
+
 
 # Install system dependencies (FFmpeg is required for frame extraction and audio slicing)
 RUN apt-get update && apt-get install -y --no-install-recommends \
