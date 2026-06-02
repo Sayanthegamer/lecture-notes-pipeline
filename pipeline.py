@@ -810,6 +810,134 @@ def compile_markdown_to_html(md_path, html_path):
     print(f"HTML textbook successfully generated at: {html_path}")
 
 
+def extract_youtube_video_id(url):
+    """
+    Extracts the 11-character video ID from a YouTube URL.
+    """
+    pattern = r'(?:v=|\/embed\/|\/1/|\/v\/|https:\/\/youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})'
+    match = re.search(pattern, url)
+    if match:
+        return match.group(1)
+    return None
+
+
+def fetch_youtube_transcript_fallback(url):
+    """
+    Attempts to fetch the YouTube video transcript without downloading the video.
+    Returns a formatted transcript string or None.
+    """
+    video_id = extract_youtube_video_id(url)
+    if not video_id:
+        print(f"Could not extract video ID from URL: {url}")
+        return None
+        
+    print(f"--- Attempting Transcript Fallback for video ID: {video_id} ---")
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        api = YouTubeTranscriptApi()
+        
+        # Get list of available transcripts to see what languages exist
+        transcript_list = api.list(video_id)
+        
+        # We prefer English first, then auto-generated English, then any other language (e.g. Hindi, Spanish, etc.)
+        languages = ['en', 'hi', 'es', 'fr', 'de', 'it', 'ja', 'ko', 'zh', 'pt', 'ru']
+        available_codes = []
+        for t in transcript_list:
+            available_codes.append(t.language_code)
+        
+        # Merge priorities
+        search_languages = [lang for lang in languages if lang in available_codes]
+        # Add remaining available codes
+        for code in available_codes:
+            if code not in search_languages:
+                search_languages.append(code)
+                
+        if not search_languages:
+            search_languages = ['en'] # default fallback
+            
+        print(f"Searching transcripts with language priorities: {search_languages}")
+        res = api.fetch(video_id, languages=search_languages)
+        raw_data = res.to_raw_data()
+        
+        formatted_lines = []
+        for entry in raw_data:
+            start_time = format_time(entry['start'])
+            formatted_lines.append(f"[{start_time}] {entry['text']}")
+            
+        transcript_str = "\n".join(formatted_lines)
+        print(f"Successfully retrieved transcript fallback! (Lines: {len(raw_data)})")
+        return transcript_str
+    except Exception as e:
+        print(f"Transcript fallback failed: {e}")
+        return None
+
+
+def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path):
+    """
+    Fallback pipeline that generates notes solely based on the retrieved transcript text.
+    Bypasses video downloads and works 100% on cloud servers (Render) without cookies.
+    """
+    print(f"--- Fallback: Compiling notes from transcript text only ---")
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        print("Error: GEMINI_API_KEY env variable is missing.")
+        return False
+        
+    client = genai.Client(api_key=api_key)
+    
+    # Clean output file first
+    with open(output_notes_path, "w", encoding="utf-8") as f:
+        f.write(f"# Compiled Lecture Study Notes: {youtube_url}\n\n")
+        f.write(f"*Processed from YouTube transcript fallback (no local media downloads).*\n\n---\n\n")
+        
+    system_instruction = (
+        "You are an elite academic instructor and expert scribe. Your goal is to produce "
+        "fully independent, self-contained, textbook-quality classroom study notes based on the provided transcript. "
+        "The notes must be so detailed and clear that a student can read them, learn the topic, understand every concept, "
+        "and replicate every mathematical derivation from scratch.\n\n"
+        "Requirements:\n"
+        "1. **Independent Readability**: Do not write high-level summaries or references to the transcript itself. Write full narrative "
+        "explanations. Define every physical setup, coordinate system, variable, constant, and physical term explicitly.\n"
+        "2. **Exhaustive Mathematics**: Replicate *every single mathematical step* discussed in the transcript. "
+        "Do not skip steps. Show starting formulas, algebraic rearrangements, and final expressions.\n"
+        "3. **Capture Spoken Nuances**: Include the instructor's verbal examples, physical analogies, explanations of *why* steps are performed, "
+        "and warnings about common student mistakes. Use callout boxes (e.g. '> [!WARNING] Common Mistake: ...' or '> [!NOTE] Explanation: ...') for emphasis.\n"
+        "4. **Format**: Render all math, equations, physical parameters, and chemical symbols in LaTeX ($...$ for inline, $$...$$ for blocks). "
+        "Structure sections cleanly with Markdown headers, bullet points, numbered lists, and comparison tables."
+    )
+    
+    prompt = (
+        "Here is the complete chronological transcript of the lecture (each line starts with a timestamp):\n\n"
+        f"{transcript_text}\n\n"
+        "Please compile the complete, detailed study notes for this entire lecture following the system instructions."
+    )
+    
+    model_name = "gemini-3.1-flash-lite"
+    print(f"Calling Gemini ({model_name}) with full transcript text...")
+    try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[prompt],
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.1
+            )
+        )
+        
+        with open(output_notes_path, "a", encoding="utf-8") as f:
+            f.write(response.text if response.text else "No content generated.")
+            
+        print(f"Notes compiled successfully from transcript!")
+        
+        # Compile HTML companion notes
+        html_notes_path = os.path.splitext(output_notes_path)[0] + ".html"
+        compile_markdown_to_html(output_notes_path, html_notes_path)
+        return True
+    except Exception as e:
+        print(f"Gemini transcript notes generation failed: {e}")
+        return False
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python pipeline.py <video_file_path_or_youtube_url> [output_notes_path] [threshold] [cooldown_seconds]")

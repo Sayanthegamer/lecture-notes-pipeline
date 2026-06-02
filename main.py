@@ -47,21 +47,34 @@ def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = 
                 with open(cookies_file, "w", encoding="utf-8") as f:
                     f.write(cookies_text)
                     
-            # 1. Download YouTube video
-            vid_file = pipeline.download_youtube_video(url, cookies_file=cookies_file)
-            if not vid_file:
-                raise Exception("YouTube video download failed.")
-                
-            jobs[job_id]["progress"] = 30
-            jobs[job_id]["message"] = "Extracting keyframes and audio slices..."
-            
             # Output filenames
             output_md = f"notes_{job_id}.md"
             output_html = f"notes_{job_id}.html"
+
+            # 1. Download YouTube video
+            vid_file = pipeline.download_youtube_video(url, cookies_file=cookies_file)
             
-            # 2. Run the main processing pipeline
-            pipeline.run_pipeline(vid_file, output_md, threshold=0.10, cooldown_seconds=30)
-            
+            if vid_file:
+                jobs[job_id]["progress"] = 30
+                jobs[job_id]["message"] = "Extracting keyframes and audio slices..."
+                
+                # 2. Run the main processing pipeline (Multimodal)
+                pipeline.run_pipeline(vid_file, output_md, threshold=0.10, cooldown_seconds=30)
+            else:
+                jobs[job_id]["progress"] = 25
+                jobs[job_id]["message"] = "Download blocked. Fetching transcript directly from YouTube..."
+                
+                # Fallback: Retrieve transcript text only
+                transcript_text = pipeline.fetch_youtube_transcript_fallback(url)
+                if not transcript_text:
+                    raise Exception("YouTube download failed and no transcript could be retrieved.")
+                    
+                jobs[job_id]["progress"] = 50
+                jobs[job_id]["message"] = "Compiling textbook study notes from transcript..."
+                
+                # 2. Run the transcript-only processing pipeline
+                pipeline.run_pipeline_transcript_only(url, transcript_text, output_md)
+                
             # 3. Read generated output files
             if os.path.exists(output_md):
                 with open(output_md, "r", encoding="utf-8") as f:
@@ -91,7 +104,7 @@ def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = 
             }
             
             # Clean up temporary video/markdown files
-            if os.path.exists(vid_file):
+            if vid_file and os.path.exists(vid_file):
                 try: os.remove(vid_file)
                 except: pass
             if os.path.exists(output_md):

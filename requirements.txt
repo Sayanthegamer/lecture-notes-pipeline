@@ -6,3 +6,4 @@ opencv-python-headless==4.9.0.80
 numpy==1.26.4
 yt-dlp>=2024.5.27
 python-dotenv==1.0.1
+youtube-transcript-api==1.2.4
