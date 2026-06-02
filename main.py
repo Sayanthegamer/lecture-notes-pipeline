@@ -27,7 +27,7 @@ jobs = {}
 
 class JobRequest(BaseModel):
     url: str
-    cookies: str = None
+    cookies: str | None = None
 
 def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = None):
     jobs[job_id] = {
