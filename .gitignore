@@ -1,0 +1,31 @@
+# API Keys and Secrets
+.env
+
+# Virtual Environment
+test_env/
+venv/
+ENV/
+
+# Python caching
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary and Debug folders
+temp_keyframes/
+debug_frames/
+extracted_notes_frames/
+
+# Media and Output Assets
+notes_media/
+*.mp4
+*.mp3
+*.webm
+*.mkv
+
+# Generated Notes / Captions
+*.html
+*.vtt
+*.srt
+lecture_notes.md
+something by gemini.md
