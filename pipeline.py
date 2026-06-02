@@ -148,7 +148,7 @@ def extract_audio_slice(video_path, audio_output_path, start_sec, duration_sec):
 def download_youtube_video(url):
     """
     Downloads a video from YouTube using yt-dlp with a multi-step fallback mechanism
-    to capture subtitles and bypass 429 rate limit blocks.
+    to capture subtitles and bypass 429 rate limit blocks on both local machines and servers.
     """
     print(f"--- Step 0: Downloading video from YouTube ---")
     video_output_path = "lecture_video.mp4"
@@ -158,38 +158,51 @@ def download_youtube_video(url):
         try: os.remove(f)
         except: pass
 
-    # Method 1: Subtitles + Edge Browser Cookies (Best bypass for 429)
-    cmd1 = [
-        "yt-dlp", "--cookies-from-browser", "edge",
+    # Define standard format/output options to avoid repeating
+    common_args = [
         "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
         "--merge-output-format", "mp4",
         "--remux-video", "mp4",
-        "--write-auto-subs", "--sub-lang", "en", "--convert-subs", "srt",
-        "-o", "lecture_video.%(ext)s", url
-    ]
-    
-    # Method 2: Subtitles only (standard request)
-    cmd2 = [
-        "yt-dlp",
-        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
-        "--merge-output-format", "mp4",
-        "--remux-video", "mp4",
-        "--write-auto-subs", "--sub-lang", "en", "--convert-subs", "srt",
-        "-o", "lecture_video.%(ext)s", url
+        "--remote-components", "ejs:github",
+        "-o", "lecture_video.%(ext)s"
     ]
 
-    # Method 3: Video stream only (no subtitle request - bypasses 429 easily)
-    cmd3 = [
-        "yt-dlp",
-        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
-        "--merge-output-format", "mp4",
-        "--remux-video", "mp4",
-        "-o", "lecture_video.%(ext)s", url
+    # Subtitle download flags
+    sub_args = [
+        "--write-auto-subs", "--sub-lang", "en", "--convert-subs", "srt"
     ]
-    
+
+    # Method 1: Local browser cookies (Edge) - Best for local runs
+    cmd1 = ["yt-dlp", "--cookies-from-browser", "edge"] + common_args + sub_args + [url]
+
+    # Method 2: Cloud Subtitles + Mobile client spoofing (Best for datacenter bypass)
+    cmd2 = ["yt-dlp", "--extractor-args", "youtube:player-client=ios,android"] + common_args + sub_args + [url]
+
+    # Method 3: Cloud Subtitles + TV/embedded client spoofing
+    cmd3 = ["yt-dlp", "--extractor-args", "youtube:player-client=web_embedded,tv_embedded"] + common_args + sub_args + [url]
+
+    # Method 4: Cloud Video stream only (no subtitles) + Mobile client spoofing
+    cmd4 = ["yt-dlp", "--extractor-args", "youtube:player-client=ios,android"] + common_args + [url]
+
+    # Method 5: Cloud Video stream only (no subtitles) + TV/embedded client spoofing
+    cmd5 = ["yt-dlp", "--extractor-args", "youtube:player-client=web_embedded,tv_embedded"] + common_args + [url]
+
+    # Method 6: Video stream only (no subtitles, standard fallback)
+    cmd6 = ["yt-dlp"] + common_args + [url]
+
+    commands = [cmd1, cmd2, cmd3, cmd4, cmd5, cmd6]
+    descriptions = [
+        "Subtitles + Local Edge Cookies (Windows)",
+        "Subtitles + Mobile Client Spoofing (iOS/Android)",
+        "Subtitles + TV/Embedded Client Spoofing",
+        "Video Stream Only + Mobile Client Spoofing",
+        "Video Stream Only + TV/Embedded Client Spoofing",
+        "Video Stream Only (Standard Fallback)"
+    ]
+
     success = False
-    for i, cmd in enumerate([cmd1, cmd2, cmd3], 1):
-        desc = ["Subtitles + Edge Cookies", "Subtitles only (standard)", "Video stream only (fallback)"][i-1]
+    for i, cmd in enumerate(commands, 1):
+        desc = descriptions[i-1]
         print(f"Trying download method {i}: {desc}...")
         try:
             # Let it show console progress
