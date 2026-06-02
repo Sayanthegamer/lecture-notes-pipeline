@@ -119,6 +119,10 @@ def get_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     return jobs[job_id]
 
+# Mount the static frontend at the root (html=True serves index.html at '/')
+# This must be mounted at the very end so it doesn't shadow /api or /notes_media routes
+app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
+
 # Bind to the PORT environment variable provided by Render
 if __name__ == "__main__":
     import uvicorn
