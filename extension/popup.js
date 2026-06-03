@@ -25,6 +25,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const serverBtn = document.getElementById('server-btn');
     const serverBtnText = document.getElementById('server-btn-text');
 
+    const copyCookiesBtn = document.getElementById('copy-cookies-btn');
+    const copyCookiesText = document.getElementById('copy-cookies-text');
+
     const progressSection = document.getElementById('progress-section');
     const overallProgressFill = document.getElementById('overall-progress-fill');
     const progressMessage = document.getElementById('progress-message');
@@ -326,6 +329,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Reset UI
         captureBtn.disabled = true;
         serverBtn.disabled = true;
+        copyCookiesBtn.disabled = true;
         captureBtnText.textContent = 'Processing...';
         progressSection.classList.remove('hidden');
         resultSection.classList.add('hidden');
@@ -444,6 +448,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } finally {
             captureBtn.disabled = false;
             serverBtn.disabled = false;
+            copyCookiesBtn.disabled = false;
             captureBtnText.textContent = 'Browser Canvas Capture';
         }
     });
@@ -455,6 +460,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Reset UI
         serverBtn.disabled = true;
         captureBtn.disabled = true;
+        copyCookiesBtn.disabled = true;
         serverBtnText.textContent = 'Processing...';
         progressSection.classList.remove('hidden');
         resultSection.classList.add('hidden');
@@ -533,6 +539,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } finally {
             serverBtn.disabled = false;
             captureBtn.disabled = false;
+            copyCookiesBtn.disabled = false;
             serverBtnText.textContent = 'Generate via Server (Fast)';
             
             // Restore step visibility and labels
@@ -540,6 +547,27 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.getElementById('step-frames').classList.remove('hidden');
             document.querySelector('#step-upload .step-label').textContent = 'Send to Backend';
             document.querySelector('#step-generate .step-label').textContent = 'Generate Notes';
+        }
+    });
+
+    // ─── Copy Cookies Flow ───
+    copyCookiesBtn.addEventListener('click', async () => {
+        const originalText = copyCookiesText.textContent;
+        copyCookiesText.textContent = 'Copying...';
+        try {
+            const cookiesText = await getYoutubeCookies();
+            if (!cookiesText) {
+                throw new Error("No YouTube cookies found. Make sure you are logged into YouTube in this browser.");
+            }
+            await navigator.clipboard.writeText(cookiesText);
+            copyCookiesText.textContent = 'Copied to Clipboard! ✅';
+            setTimeout(() => {
+                copyCookiesText.textContent = originalText;
+            }, 3000);
+        } catch (e) {
+            console.error(e);
+            alert(e.message || "Failed to copy cookies.");
+            copyCookiesText.textContent = originalText;
         }
     });
 

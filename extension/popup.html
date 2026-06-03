@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lecture Notes Scribe</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="popup-container">
+        <!-- Header -->
+        <header class="popup-header">
+            <div class="logo">
+                <span class="logo-icon">📚</span>
+                <h1>Lecture Notes Scribe</h1>
+            </div>
+            <button id="settings-toggle" class="icon-btn" title="Settings">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+            </button>
+        </header>
+
+        <!-- Settings Panel (hidden by default) -->
+        <div id="settings-panel" class="settings-panel hidden">
+            <div class="form-group">
+                <label for="backend-url">Backend API URL:</label>
+                <input type="text" id="backend-url" placeholder="https://your-app.onrender.com/">
+            </div>
+            <div class="form-group">
+                <label for="frame-interval">Frame Capture Interval (seconds):</label>
+                <input type="number" id="frame-interval" value="30" min="10" max="120" step="5">
+            </div>
+            <button id="save-settings" class="secondary-btn btn-sm">Save Settings</button>
+        </div>
+
+        <!-- Video Detection Card -->
+        <div id="video-card" class="video-card">
+            <div id="video-detected" class="hidden">
+                <div class="video-info">
+                    <div class="video-badge">
+                        <span class="badge-dot"></span>
+                        <span>YouTube Video Detected</span>
+                    </div>
+                    <h2 id="video-title" class="video-title">Loading...</h2>
+                    <div class="video-meta">
+                        <span id="video-duration" class="meta-tag">⏱ --:--:--</span>
+                        <span id="video-id-display" class="meta-tag">🔗 ---</span>
+                    </div>
+                </div>
+            </div>
+            <div id="no-video" class="no-video">
+                <div class="empty-state">
+                    <span class="empty-icon">🎬</span>
+                    <p>Navigate to a YouTube video to get started.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="actions-group">
+            <button id="server-btn" class="capture-btn" disabled>
+                <span class="capture-icon">⚡</span>
+                <span id="server-btn-text">Generate via Server (Fast)</span>
+            </button>
+            <button id="copy-cookies-btn" class="capture-btn canvas-btn">
+                <span class="capture-icon">📋</span>
+                <span id="copy-cookies-text">Copy Cookies for Website</span>
+            </button>
+            <button id="capture-btn" class="capture-btn canvas-btn" disabled>
+                <span class="capture-icon">📸</span>
+                <span id="capture-btn-text">Browser Canvas Capture</span>
+            </button>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="progress-section" class="progress-section hidden">
+            <div class="progress-steps">
+                <div id="step-transcript" class="step">
+                    <div class="step-indicator pending"></div>
+                    <span class="step-label">Extract Transcript</span>
+                    <span id="step-transcript-status" class="step-status">Pending</span>
+                </div>
+                <div id="step-frames" class="step">
+                    <div class="step-indicator pending"></div>
+                    <span class="step-label">Capture Keyframes</span>
+                    <span id="step-frames-status" class="step-status">Pending</span>
+                </div>
+                <div id="step-upload" class="step">
+                    <div class="step-indicator pending"></div>
+                    <span class="step-label">Send to Backend</span>
+                    <span id="step-upload-status" class="step-status">Pending</span>
+                </div>
+                <div id="step-generate" class="step">
+                    <div class="step-indicator pending"></div>
+                    <span class="step-label">Generate Notes</span>
+                    <span id="step-generate-status" class="step-status">Pending</span>
+                </div>
+            </div>
+
+            <div class="progress-bar-container">
+                <div id="overall-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+            </div>
+            <p id="progress-message" class="progress-message">Initializing...</p>
+        </div>
+
+        <!-- Result Section -->
+        <div id="result-section" class="result-section hidden">
+            <div class="result-success">
+                <span class="result-icon">✅</span>
+                <h3>Notes Generated Successfully!</h3>
+                <p id="result-info" class="result-info"></p>
+            </div>
+            <div class="result-actions">
+                <button id="open-notes-btn" class="primary-btn">Open Notes in Browser</button>
+                <button id="copy-md-btn" class="secondary-btn">Copy Markdown</button>
+            </div>
+        </div>
+
+        <!-- Error Section -->
+        <div id="error-section" class="error-section hidden">
+            <div class="error-content">
+                <span class="error-icon">❌</span>
+                <p id="error-message">An error occurred.</p>
+            </div>
+            <button id="retry-btn" class="secondary-btn btn-sm">Try Again</button>
+        </div>
+
+        <!-- Footer -->
+        <footer class="popup-footer">
+            <span>Powered by Gemini AI</span>
+        </footer>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>
