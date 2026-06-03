@@ -1,5 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
     const backendUrlInput = document.getElementById('backend-url');
+    const apiKeyInput = document.getElementById('api-key');
     const generatorForm = document.getElementById('generator-form');
     const lectureUrlInput = document.getElementById('lecture-url');
     const youtubeCookiesInput = document.getElementById('youtube-cookies');
@@ -41,6 +42,12 @@ document.addEventListener('DOMContentLoaded', () => {
         youtubeCookiesInput.value = savedCookies;
     }
 
+    // Load saved API key
+    const savedApiKey = localStorage.getItem('notes_scribe_api_key');
+    if (savedApiKey && apiKeyInput) {
+        apiKeyInput.value = savedApiKey;
+    }
+
     // Save URL when changed
     backendUrlInput.addEventListener('change', () => {
         let url = backendUrlInput.value.trim();
@@ -55,6 +62,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (youtubeCookiesInput) {
         youtubeCookiesInput.addEventListener('change', () => {
             localStorage.setItem('notes_scribe_youtube_cookies', youtubeCookiesInput.value.trim());
+        });
+    }
+
+    // Save API key when changed
+    if (apiKeyInput) {
+        apiKeyInput.addEventListener('change', () => {
+            localStorage.setItem('notes_scribe_api_key', apiKeyInput.value.trim());
         });
     }
 
@@ -109,7 +123,10 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${apiBase}api/generate`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'X-API-Key': apiKeyInput ? apiKeyInput.value.trim() : ""
+                },
                 body: JSON.stringify({ 
                     url: lectureUrl,
                     cookies: youtubeCookies || null
