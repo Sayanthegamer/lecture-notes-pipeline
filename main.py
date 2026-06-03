@@ -24,10 +24,14 @@ logger = logging.getLogger("lecture_notes_scribe")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.warning("SUPABASE_URL or SUPABASE_KEY environment variables are not set. The application requires Supabase to function.")
+    raise RuntimeError(
+        "SUPABASE_URL and SUPABASE_KEY environment variables must be set. "
+        "The application requires Supabase for distributed state and storage, and cannot start without them. "
+        "Choice: Fail fast (RuntimeError raised)."
+    )
     
 # Initialize standard sync client (we will wrap calls in asyncio.to_thread)
-supabase: Client = create_client(SUPABASE_URL or "", SUPABASE_KEY or "")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Background task control
 _queue_worker_task = None
@@ -104,18 +108,42 @@ async def queue_worker():
                 else:
                     # Capture Job (or unknown). If workspace exists, it's an active capture job on this server.
                     if os.path.exists(workspace_dir):
-                        # The frames are there, run capture pipeline
-                        # Wait, we need the transcript too. We didn't save transcript to DB.
-                        # For a robust architecture, capture jobs should store transcript and frames in Supabase or be synchronous until queue.
-                        # Since capture jobs require ephemeral data, if the server restarts, they fail.
-                        # For this execution, we will assume capture jobs are handled in the background task directly and NOT via the queue worker,
-                        # OR we pass the data. Actually, the user's plan says: 
-                        # "Update `/api/generate` and `/api/generate-from-capture` endpoints to insert job metadata into Supabase with 'queued' status."
-                        # If the queue worker processes them, it doesn't have the `transcript` or `frames` because they were only passed in the HTTP request.
-                        # To fix this: Capture jobs will just fail if picked up by a different server.
-                        pass
-                        
-                    await async_update_job_in_db(job_id, {"status": "failed", "message": "Capture job lost due to server restart or missing payload."})
+                        try:
+                            # Read transcript from workspace
+                            transcript_path = os.path.join(workspace_dir, "transcript.txt")
+                            if os.path.exists(transcript_path):
+                                with open(transcript_path, "r", encoding="utf-8") as f:
+                                    transcript_text = f.read()
+                            else:
+                                transcript_text = ""
+                            
+                            # Call the capture pipeline handler
+                            md_text, html_text = await pipeline.run_capture_pipeline_async(job_id, workspace_dir, transcript_text, job['url'])
+                            
+                            # Update job status to completed
+                            await async_update_job_in_db(job_id, {
+                                "status": "completed",
+                                "progress": 100,
+                                "message": "Notes successfully compiled from browser capture!",
+                                "markdown": md_text,
+                                "html": html_text
+                            })
+                        except Exception as e:
+                            logger.error(f"Capture pipeline processing failed for job {job_id}: {e}")
+                            await async_update_job_in_db(job_id, {
+                                "status": "failed",
+                                "progress": 100,
+                                "message": f"Capture pipeline failed: {str(e)}"
+                            })
+                        finally:
+                            # Clean up the temporary workspace directory
+                            if os.path.exists(workspace_dir):
+                                try:
+                                    shutil.rmtree(workspace_dir)
+                                except OSError as cleanup_err:
+                                    logger.warning(f"Failed to cleanup workspace {workspace_dir}: {cleanup_err}")
+                    else:
+                        await async_update_job_in_db(job_id, {"status": "failed", "message": "Capture job lost due to server restart or missing payload."})
                     
             else:
                 # No queued jobs, sleep briefly
@@ -246,7 +274,7 @@ async def generate_notes_from_capture(request: CaptureJobRequest, background_tas
     
     return {"job_id": job_id}
 
-@app.get("/api/status/{job_id}", dependencies=[Depends(get_api_key)])
+@app.get("/api/status/{job_id}")
 async def get_status(job_id: str):
     def _fetch():
         res = supabase.table('jobs').select('*').eq('job_id', job_id).execute()

@@ -722,14 +722,15 @@ def chunk_transcript(transcript_text, chunk_duration_sec=600):
     return chunks
 
 async def run_pipeline_transcript_only_async(youtube_url, transcript_text, job_id, chunk_duration_sec=600, rate_limit_delay=5):
+    logger.info(f"[{job_id}] Starting transcript-only pipeline for {youtube_url}")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise Exception("GEMINI_API_KEY env variable is missing.")
+        raise Exception(f"[{job_id}] GEMINI_API_KEY env variable is missing.")
     client = genai.Client(api_key=api_key)
     
     chunks = chunk_transcript(transcript_text, chunk_duration_sec=chunk_duration_sec)
     if not chunks:
-        raise Exception("No transcript chunks could be generated.")
+        raise Exception(f"[{job_id}] No transcript chunks could be generated.")
         
     md_text = f"# Compiled Lecture Study Notes: {youtube_url}\n\n*Processed from YouTube transcript fallback (no local media downloads) in chunks.*\n\n---\n\n"
         
@@ -771,6 +772,7 @@ async def run_pipeline_transcript_only_async(youtube_url, transcript_text, job_i
             )
             
         try:
+            logger.info(f"[{job_id}] Requesting content generation from Gemini for segment {i} of {len(chunks)}")
             def _generate():
                 return client.models.generate_content(
                     model=model_name,
@@ -786,10 +788,156 @@ async def run_pipeline_transcript_only_async(youtube_url, transcript_text, job_i
             previous_context = cleaned_text[-2000:] if cleaned_text else ""
             
             md_text += f"## Segment: {start_time_str} - {end_time_str}\n\n{cleaned_text}\n\n---\n\n"
+            logger.info(f"[{job_id}] Successfully generated notes for segment {i}")
         except Exception as e:
-            print(f"API generation failed for segment {i}: {e}")
+            logger.error(f"[{job_id}] API generation failed for segment {i}: {e}")
             
         if i < len(chunks):
+            await asyncio.sleep(rate_limit_delay)
+            
+    html_text = compile_markdown_to_html_string(md_text)
+    return md_text, html_text
+
+async def run_capture_pipeline_async(job_id: str, workspace_dir: str, transcript_text: str, youtube_url: str):
+    """
+    Background multimodal pipeline for processing pre-captured Chrome extension keyframe images and transcript.
+    """
+    import main  # Circular reference protection
+    
+    logger.info(f"[{job_id}] Starting capture-based multimodal pipeline for {youtube_url}")
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise Exception(f"[{job_id}] GEMINI_API_KEY env variable is missing.")
+    client = genai.Client(api_key=api_key)
+    
+    # Chunk the transcript
+    chunk_duration_sec = 10 * 60
+    rate_limit_delay = 5
+    chunks = chunk_transcript(transcript_text, chunk_duration_sec=chunk_duration_sec)
+    if not chunks:
+        raise Exception(f"[{job_id}] No transcript chunks could be generated.")
+        
+    # Gather pre-captured keyframes from workspace_dir
+    frame_info = []
+    image_paths = sorted(glob.glob(os.path.join(workspace_dir, "frame_*.jpg")))
+    for img_path in image_paths:
+        # Match time_HH_MM_SS or time_MM_SS
+        match = re.search(r'time_(\d{2})_(\d{2})_(\d{2})', img_path)
+        if match:
+            h, m, s = map(int, match.groups())
+            sec = h * 3600 + m * 60 + s
+            frame_info.append({"path": img_path, "time_sec": sec, "filename": os.path.basename(img_path)})
+        else:
+            match = re.search(r'time_(\d{2})_(\d{2})', img_path)
+            if match:
+                m, s = map(int, match.groups())
+                sec = m * 60 + s
+                frame_info.append({"path": img_path, "time_sec": sec, "filename": os.path.basename(img_path)})
+                
+    md_text = f"# Compiled Lecture Study Notes: {youtube_url}\n\n*Processed from browser-captured keyframes + transcript via Chrome Extension.*\n\n---\n\n"
+    
+    system_instruction = (
+        "You are an elite academic instructor and expert scribe. Your goal is to produce "
+        "fully independent, self-contained, textbook-quality classroom study notes based on the provided inputs. "
+        "The notes must be so detailed and clear that a student can read them, learn the topic, understand every concept, "
+        "and replicate every mathematical derivation from scratch without watching the video.\n\n"
+        "Requirements:\n"
+        "1. **Independent Readability**: Do not write high-level summaries or references to the video itself. Write full narrative "
+        "explanations. Define every physical setup, coordinate system, variable, constant, and physical term explicitly.\n"
+        "2. **Exhaustive Mathematics**: Replicate *every single mathematical step* shown on the board or discussed in the audio. "
+        "Do not skip steps. Show starting formulas, algebraic rearrangements, boundary conditions for integrals, substitutions, and final expressions.\n"
+        "3. **Capture Spoken Nuances**: Include the instructor's verbal examples, physical analogies, explanations of *why* steps are performed, "
+        "and warnings about common student mistakes. Use callout boxes (e.g. '> [!WARNING] Common Mistake: ...' or '> [!NOTE] Explanation: ...') for emphasis.\n"
+        "4. **Whiteboard Illustrations & Diagrams**: Do not use ASCII art. Instead, you MUST embed the actual "
+        "whiteboard image/slide displaying the drawing or diagram. To do this, identify the keyframe image in your inputs "
+        "that shows the diagram most clearly, and embed it using its exact filename. Format it exactly as: "
+        "`![Description of Diagram](filename.jpg)` (e.g. `![Electric field lines in sphere](frame_023_time_00_11_30.jpg)`). "
+        "Place the embedded image immediately before the explanation or derivation of that diagram.\n"
+        "5. **Format**: Render all math, equations, physical parameters, and chemical symbols in LaTeX ($...$ for inline, $$...$$ for blocks). "
+        "Structure sections cleanly with Markdown headers, bullet points, numbered lists, and comparison tables."
+    )
+    
+    previous_context = ""
+    model_name = "gemini-3.1-flash-lite"
+    total_chunks = len(chunks)
+    
+    for i, chunk in enumerate(chunks, 1):
+        start_time_str = format_time(chunk["start_sec"])
+        end_time_str = format_time(chunk["end_sec"])
+        
+        percent = 30 + int(((i - 1) / total_chunks) * 60)
+        await main.async_update_job_in_db(job_id, {"progress": percent, "message": f"Compiling study notes from capture: segment {i} of {total_chunks}..."})
+        
+        # Filter keyframes for this segment
+        segment_frames = [f for f in frame_info if chunk["start_sec"] <= f["time_sec"] <= chunk["end_sec"]]
+        
+        contents = []
+        for frame in segment_frames:
+            try:
+                def _open_img():
+                    return Image.open(frame["path"])
+                img = await asyncio.to_thread(_open_img)
+                contents.append(img)
+            except Exception as e:
+                logger.warning(f"[{job_id}] Failed to load keyframe {frame['path']}: {e}")
+                
+        prompt = (
+            f"You are writing complete, independent study notes for the lecture segment from {start_time_str} to {end_time_str}.\n"
+            f"You have been provided with visual keyframe images representing visual checkpoints in this range "
+            f"(each filename indicates its exact timestamp). "
+            f"And the matching text transcript below:\n\n{chunk['text']}\n\n"
+            "Align the visual images with the spoken transcript chronologically to write complete, textbook-style notes."
+        )
+        
+        if segment_frames:
+            prompt += "\n\nThe following keyframe images are attached in your input contents in chronological order. If you choose to embed any of them, you MUST use their exact filename from this list:\n"
+            for frame in segment_frames:
+                prompt += f"- {frame['filename']}\n"
+                
+        if previous_context:
+            prompt += (
+                f"\n\nHere is the tail end of the previous segment's notes for reference. "
+                "Ensure smooth transitions, continuous flow, and consistent mathematical notation:\n"
+                f"...\n{previous_context}\n"
+            )
+            
+        contents.append(prompt)
+        
+        try:
+            logger.info(f"[{job_id}] Requesting content generation for capture segment {i} of {total_chunks}")
+            def _generate():
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.1
+                    )
+                )
+            response = await asyncio.to_thread(_generate)
+            cleaned_text = response.text if response.text else ""
+            previous_context = cleaned_text[-2000:] if cleaned_text else ""
+            
+            # Copy embedded keyframe images to notes_media and rewrite paths
+            image_links = re.findall(r'!\[(.*?)]\(((?:.*?/)?(frame_\d{3}_time_.*?\.jpg))\)', cleaned_text)
+            if image_links:
+                media_dir = "./notes_media"
+                os.makedirs(media_dir, exist_ok=True)
+                for alt_text, full_path_in_link, filename in image_links:
+                    src_path = os.path.join(workspace_dir, filename)
+                    dst_path = os.path.join(media_dir, filename)
+                    if os.path.exists(src_path):
+                        if not os.path.exists(dst_path):
+                            await asyncio.to_thread(shutil.copy, src_path, dst_path)
+                        relative_link = f"./notes_media/{filename}"
+                        cleaned_text = cleaned_text.replace(f"({full_path_in_link})", f"({relative_link})")
+            
+            md_text += f"## Segment: {start_time_str} - {end_time_str}\n\n{cleaned_text}\n\n---\n\n"
+            logger.info(f"[{job_id}] Successfully generated notes for capture segment {i}")
+        except Exception as e:
+            logger.error(f"[{job_id}] API generation failed for capture segment {i}: {e}")
+            
+        if i < total_chunks:
             await asyncio.sleep(rate_limit_delay)
             
     html_text = compile_markdown_to_html_string(md_text)
