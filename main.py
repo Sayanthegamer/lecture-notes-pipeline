@@ -6,6 +6,7 @@ import time
 import asyncio
 import contextlib
 import logging
+from urllib.parse import urlparse
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -94,8 +95,10 @@ async def queue_worker():
                 # If it's a standard URL, run standard pipeline.
                 # If it was a capture job, its frames were stored locally. If the server restarted, the frames are gone.
                 workspace_dir = f"./tmp/lecture_pipeline_{job_id}"
-                
-                if "youtube.com" in job['url'] or "youtu.be" in job['url']:
+                parsed_url = urlparse(job['url'])
+                host = (parsed_url.hostname or "").lower()
+
+                if host in {"youtube.com", "www.youtube.com", "youtu.be"}:
                     # Standard YouTube Job
                     await pipeline.run_pipeline_task_async(job_id, job['url'])
                 else:
