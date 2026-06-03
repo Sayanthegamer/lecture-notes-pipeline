@@ -72,6 +72,19 @@ document.addEventListener('DOMContentLoaded', () => {
         return url;
     }
 
+    // Auto-load job if jobId is in URL (Desktop viewer redirect)
+    const urlParams = new URLSearchParams(window.location.search);
+    const initialJobId = urlParams.get('jobId');
+    if (initialJobId) {
+        const apiBase = getApiBase();
+        if (apiBase) {
+            generatorForm.classList.add('hidden'); // Optionally hide form
+            progressContainer.classList.remove('hidden');
+            statusMessage.innerText = "Loading job from URL...";
+            startPolling(initialJobId, apiBase);
+        }
+    }
+
     // 2. Handle Form Submission (Start Pipeline)
     generatorForm.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -112,6 +125,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const jobId = data.job_id;
             
             statusMessage.innerText = "Job accepted! Starting processing...";
+            
+            // Add a 3s cold-start warning if this is Render
+            if (apiBase.includes('render.com')) {
+                setTimeout(() => {
+                    if (progressPercent.innerText === "0%") {
+                        statusMessage.innerText = "Server is waking up from cold start... (~50s)";
+                    }
+                }, 3000);
+            }
+            
             startPolling(jobId, apiBase);
 
         } catch (error) {

@@ -459,22 +459,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             // ── Step 4: Poll for Generation Result ──
             setStep('generate', 'active', 'Processing...');
 
-            const result = await pollJobStatus(backendUrl, jobId, false, apiKey);
-
-            if (result.status === 'completed') {
-                setStep('generate', 'done', 'Complete');
-                setProgress(100, 'Notes generated successfully!');
-
-                storedMarkdown = result.markdown || '';
-                storedHtml = result.html || '';
-
-                resultInfo.textContent = `Generated ${storedMarkdown.length.toLocaleString()} characters of study notes.`;
-                resultSection.classList.remove('hidden');
-                progressSection.classList.add('hidden');
-            } else {
-                setStep('generate', 'error', 'Failed');
-                throw new Error(result.message || 'Notes generation failed on the server.');
-            }
+            chrome.runtime.sendMessage({ action: 'startJob', jobId, backendUrl, apiKey });
+            await pollJobStatus(backendUrl, jobId, false, apiKey);
 
         } catch (error) {
             console.error('Pipeline error:', error);
@@ -554,22 +540,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // ── Step 2: Poll status ──
             setStep('generate', 'active', 'Processing...');
-            const result = await pollJobStatus(backendUrl, jobId, true, apiKey); // true for isServerFlow
-
-            if (result.status === 'completed') {
-                setStep('generate', 'done', 'Complete');
-                setProgress(100, 'Notes compiled successfully!');
-
-                storedMarkdown = result.markdown || '';
-                storedHtml = result.html || '';
-
-                resultInfo.textContent = `Generated ${storedMarkdown.length.toLocaleString()} characters of study notes.`;
-                resultSection.classList.remove('hidden');
-                progressSection.classList.add('hidden');
-            } else {
-                setStep('generate', 'error', 'Failed');
-                throw new Error(result.message || 'Server-side notes compilation failed.');
-            }
+            
+            chrome.runtime.sendMessage({ action: 'startJob', jobId, backendUrl, apiKey });
+            await pollJobStatus(backendUrl, jobId, true, apiKey); // true for isServerFlow
 
         } catch (error) {
             console.error('Server pipeline error:', error);
@@ -627,35 +600,63 @@ document.addEventListener('DOMContentLoaded', async () => {
     async function pollJobStatus(backendUrl, jobId, isServerFlow = false, apiKey = '') {
         const pollInterval = 5000; // 5 seconds
         const maxAttempts = 360;   // 30 minutes max
+        let currentStatus = 'processing';
 
-        for (let i = 0; i < maxAttempts; i++) {
+        for (let i = 0; i < maxAttempts && currentStatus === 'processing'; i++) {
             await new Promise(r => setTimeout(r, pollInterval));
 
             try {
                 const response = await fetch(`${backendUrl}api/status/${jobId}`, {
-                    headers: {
-                        'X-API-Key': apiKey
-                    }
+                    headers: { 'X-API-Key': apiKey }
                 });
                 if (!response.ok) continue;
 
                 const data = await response.json();
+                currentStatus = data.status;
 
-                // Update progress
-                const genProgress = isServerFlow ? data.progress : (50 + (data.progress / 100) * 50); // Scale 0-100 to 50-100
-                setProgress(genProgress, data.message);
-                setStep('generate', 'active', `${data.progress}%`);
-
-                if (data.status === 'completed' || data.status === 'failed') {
-                    return data;
-                }
+                // Sync state to local storage for the UI to pick up via the listener below
+                await chrome.storage.local.set({
+                    jobStatus: data.status,
+                    jobProgress: data.progress,
+                    jobMessage: data.message,
+                    jobMarkdown: data.markdown,
+                    jobHtml: data.html
+                });
             } catch (e) {
                 setProgress(null, 'Connection lost. Retrying...');
             }
         }
-
-        return { status: 'failed', message: 'Timed out waiting for notes generation.' };
     }
+
+    // ─── Listen for storage changes to render UI statelessly ───
+    chrome.storage.onChanged.addListener((changes, namespace) => {
+        if (namespace === 'local' && progressSection && !progressSection.classList.contains('hidden')) {
+            if (changes.jobProgress || changes.jobMessage || changes.jobStatus) {
+                chrome.storage.local.get(['jobProgress', 'jobMessage', 'jobStatus', 'jobMarkdown', 'jobHtml'], (data) => {
+                    const rawProgress = data.jobProgress || 0;
+                    setProgress(rawProgress, data.jobMessage);
+                    
+                    if (data.jobStatus === 'processing') {
+                        setStep('generate', 'active', `${rawProgress}%`);
+                    } else if (data.jobStatus === 'completed') {
+                        setStep('generate', 'done', 'Complete');
+                        setProgress(100, 'Notes compiled successfully!');
+        
+                        storedMarkdown = data.jobMarkdown || '';
+                        storedHtml = data.jobHtml || '';
+        
+                        resultInfo.textContent = `Generated ${storedMarkdown.length.toLocaleString()} characters of study notes.`;
+                        resultSection.classList.remove('hidden');
+                        progressSection.classList.add('hidden');
+                    } else if (data.jobStatus === 'failed') {
+                        setStep('generate', 'error', 'Failed');
+                        errorMessage.textContent = data.jobMessage || 'Server-side notes compilation failed.';
+                        errorSection.classList.remove('hidden');
+                    }
+                });
+            }
+        }
+    });
 
     // ─── Result Actions ───
     openNotesBtn.addEventListener('click', () => {
