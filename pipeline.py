@@ -931,6 +931,176 @@ def chunk_transcript(transcript_text, chunk_duration_sec=600):
     return chunks
 
 
+def run_pipeline_from_capture(youtube_url, transcript_text, frame_dir, output_notes_path, chunk_duration_sec=600, rate_limit_delay=5):
+    """
+    Multimodal pipeline that generates notes from browser-captured data.
+    Uses pre-captured keyframe images + transcript text (sent from the Chrome extension)
+    to produce the same quality output as the full video download pipeline.
+    """
+    print(f"--- Chrome Extension Capture Pipeline: Compiling multimodal notes in {chunk_duration_sec // 60}-minute chunks ---")
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        print("Error: GEMINI_API_KEY env variable is missing.")
+        return False
+        
+    client = genai.Client(api_key=api_key)
+    
+    # 1. Chunk the transcript
+    chunks = chunk_transcript(transcript_text, chunk_duration_sec=chunk_duration_sec)
+    if not chunks:
+        print("Error: No transcript chunks could be generated.")
+        return False
+        
+    print(f"Transcript split into {len(chunks)} segments for sequential processing.")
+    
+    # 2. Collect all available keyframe images from the frame directory
+    all_frame_paths = sorted(glob.glob(os.path.join(frame_dir, "frame_*.jpg")))
+    print(f"Total captured keyframes available: {len(all_frame_paths)}")
+    
+    # Parse timestamps from filenames to assign to chunks
+    frame_info = []
+    for fpath in all_frame_paths:
+        match = re.search(r'time_(\d{2})_(\d{2})_(\d{2})', fpath)
+        if match:
+            h, m, s = map(int, match.groups())
+            frame_time_sec = h * 3600 + m * 60 + s
+            frame_info.append({"path": fpath, "time_sec": frame_time_sec, "filename": os.path.basename(fpath)})
+    
+    # Clean output file first
+    with open(output_notes_path, "w", encoding="utf-8") as f:
+        f.write(f"# Compiled Lecture Study Notes: {youtube_url}\n\n")
+        f.write(f"*Processed from browser-captured keyframes + transcript via Chrome Extension.*\n\n---\n\n")
+        
+    system_instruction = (
+        "You are an elite academic instructor and expert scribe. Your goal is to produce "
+        "fully independent, self-contained, textbook-quality classroom study notes based on the provided inputs. "
+        "The notes must be so detailed and clear that a student can read them, learn the topic, understand every concept, "
+        "and replicate every mathematical derivation from scratch without watching the video.\n\n"
+        "Requirements:\n"
+        "1. **Independent Readability**: Do not write high-level summaries or references to the video itself. Write full narrative "
+        "explanations. Define every physical setup, coordinate system, variable, constant, and physical term explicitly.\n"
+        "2. **Exhaustive Mathematics**: Replicate *every single mathematical step* shown on the board or discussed in the audio. "
+        "Do not skip steps. Show starting formulas, algebraic rearrangements, boundary conditions for integrals, substitutions, and final expressions.\n"
+        "3. **Capture Spoken Nuances**: Include the instructor's verbal examples, physical analogies, explanations of *why* steps are performed, "
+        "and warnings about common student mistakes. Use callout boxes (e.g. '> [!WARNING] Common Mistake: ...' or '> [!NOTE] Explanation: ...') for emphasis.\n"
+        "4. **Whiteboard Illustrations & Diagrams**: Do not use ASCII art. Instead, you MUST embed the actual "
+        "whiteboard image/slide displaying the drawing or diagram. To do this, identify the keyframe image in your inputs "
+        "that shows the diagram most clearly, and embed it using its exact filename. Format it exactly as: "
+        "`![Description of Diagram](filename.jpg)` (e.g. `![Electric field lines in sphere](frame_023_time_00_11_30.jpg)`). "
+        "Place the embedded image immediately before the explanation or derivation of that diagram. "
+        "**Unobstructed View rule**: If the instructor is standing in front of or blocking a diagram or writing in one frame, "
+        "look at the surrounding or subsequent frames to find the moment where the instructor has moved away and "
+        "the board/diagram is fully completed and completely unobstructed. Always select and embed the filename of this "
+        "clearest, cleanest version.\n"
+        "5. **Format**: Render all math, equations, physical parameters, and chemical symbols in LaTeX ($...$ for inline, $$...$$ for blocks). "
+        "Structure sections cleanly with Markdown headers, bullet points, numbered lists, and comparison tables."
+    )
+    
+    previous_context = ""
+    model_name = "gemini-3.1-flash-lite"
+    
+    for i, chunk in enumerate(chunks, 1):
+        start_time_str = format_time(chunk["start_sec"])
+        end_time_str = format_time(chunk["end_sec"])
+        
+        print(f"\nProcessing segment {i}/{len(chunks)}: {start_time_str} to {end_time_str}...")
+        
+        # Filter keyframes belonging to this time segment
+        segment_frames = [f for f in frame_info if chunk["start_sec"] <= f["time_sec"] <= chunk["end_sec"]]
+        
+        # Assemble multimodal contents
+        contents = []
+        
+        # Add keyframe images
+        print(f"Attaching {len(segment_frames)} keyframes for this segment...")
+        for frame in segment_frames:
+            try:
+                img = Image.open(frame["path"])
+                contents.append(img)
+            except Exception as e:
+                print(f"Failed to load keyframe {frame['path']}: {e}")
+        
+        # Build prompt
+        prompt = (
+            f"You are writing complete, independent study notes for the lecture segment from {start_time_str} to {end_time_str}.\n"
+            f"You have been provided with visual keyframe images representing visual checkpoints in this range "
+            f"(each filename indicates its exact timestamp). "
+            f"And the matching text transcript below:\n\n{chunk['text']}\n\n"
+            "Align the visual images with the spoken transcript chronologically to write complete, textbook-style notes."
+        )
+        
+        # List the attached image filenames
+        if segment_frames:
+            prompt += "\n\nThe following keyframe images are attached in your input contents in chronological order. If you choose to embed any of them, you MUST use their exact filename from this list:\n"
+            for frame in segment_frames:
+                prompt += f"- {frame['filename']}\n"
+        
+        if previous_context:
+            prompt += (
+                f"\n\nHere is the tail end of the previous segment's notes for reference. "
+                "Ensure smooth transitions, continuous flow, and consistent mathematical notation:\n"
+                f"...\n{previous_context}\n"
+            )
+            
+        contents.append(prompt)
+        
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.1
+                )
+            )
+            
+            cleaned_text = response.text if response.text else ""
+            previous_context = cleaned_text[-2000:] if cleaned_text else ""
+            
+            # Copy embedded keyframe images to notes_media and rewrite paths
+            image_links = re.findall(r'!\[(.*?)]\(((?:.*?/)?(frame_\d{3}_time_.*?\.jpg))\)', cleaned_text)
+            
+            if image_links:
+                import shutil
+                media_dir = "./notes_media"
+                if not os.path.exists(media_dir):
+                    os.makedirs(media_dir)
+                for alt_text, full_path_in_link, filename in image_links:
+                    src_path = os.path.join(frame_dir, filename)
+                    dst_path = os.path.join(media_dir, filename)
+                    if os.path.exists(src_path):
+                        if not os.path.exists(dst_path):
+                            shutil.copy(src_path, dst_path)
+                            print(f" Copied diagram image to: {dst_path}")
+                        relative_link = f"./notes_media/{filename}"
+                        cleaned_text = cleaned_text.replace(f"({full_path_in_link})", f"({relative_link})")
+            
+            # Write to output notes file
+            with open(output_notes_path, "a", encoding="utf-8") as f:
+                f.write(f"## Segment: {start_time_str} - {end_time_str}\n\n")
+                f.write(cleaned_text)
+                f.write("\n\n---\n\n")
+                
+            print(f"Notes for segment {i} written successfully.")
+            
+        except Exception as e:
+            print(f"API generation failed for segment {i}: {e}")
+            
+        # Rate limit cooldown delay
+        if i < len(chunks):
+            print(f"Sleeping for {rate_limit_delay} seconds to stay under token rate limits...")
+            time.sleep(rate_limit_delay)
+            
+    # Compile HTML companion notes
+    html_notes_path = os.path.splitext(output_notes_path)[0] + ".html"
+    try:
+        compile_markdown_to_html(output_notes_path, html_notes_path)
+    except Exception as e:
+        print(f"Warning: Failed to compile HTML textbook preview: {e}")
+        
+    return True
+
+
 def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path, chunk_duration_sec=600, rate_limit_delay=5):
     """
     Fallback pipeline that generates notes solely based on the retrieved transcript text.

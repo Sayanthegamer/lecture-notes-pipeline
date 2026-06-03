@@ -1,6 +1,7 @@
 import os
 import uuid
 import sys
+import base64
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +29,16 @@ jobs = {}
 class JobRequest(BaseModel):
     url: str
     cookies: str | None = None
+
+class CaptureFrame(BaseModel):
+    timestamp: str
+    filename: str
+    data: str  # base64 JPEG data
+
+class CaptureJobRequest(BaseModel):
+    url: str
+    transcript: str
+    frames: list[CaptureFrame] = []
 
 def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = None):
     jobs[job_id] = {
@@ -128,6 +139,85 @@ def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = 
             try: os.remove(cookies_file)
             except: pass
 
+
+def run_capture_pipeline_task(job_id: str, url: str, base_url: str, transcript: str, frames_dir: str):
+    """
+    Background task for processing Chrome extension-captured data.
+    Uses the multimodal pipeline with pre-captured keyframes + transcript.
+    """
+    jobs[job_id] = {
+        "status": "processing",
+        "progress": 20,
+        "message": "Processing captured keyframes and transcript...",
+        "markdown": None,
+        "html": None,
+    }
+    
+    try:
+        output_md = f"notes_{job_id}.md"
+        output_html = f"notes_{job_id}.html"
+        
+        jobs[job_id]["progress"] = 30
+        jobs[job_id]["message"] = "Compiling multimodal study notes with Gemini..."
+        
+        # Run the capture-based multimodal pipeline
+        success = pipeline.run_pipeline_from_capture(url, transcript, frames_dir, output_md)
+        
+        if not success:
+            raise Exception("Multimodal pipeline processing failed.")
+        
+        # Read generated output files
+        if os.path.exists(output_md):
+            with open(output_md, "r", encoding="utf-8") as f:
+                md_text = f.read()
+        else:
+            raise Exception("Notes generation failed (Markdown not found).")
+            
+        if os.path.exists(output_html):
+            with open(output_html, "r", encoding="utf-8") as f:
+                html_text = f.read()
+        else:
+            html_text = ""
+            
+        # Rewrite relative image paths to point to Render's absolute static url
+        backend_media_url = f"{base_url}notes_media/"
+        if md_text:
+            md_text = md_text.replace("./notes_media/", backend_media_url)
+        if html_text:
+            html_text = html_text.replace("./notes_media/", backend_media_url)
+            
+        jobs[job_id] = {
+            "status": "completed",
+            "progress": 100,
+            "message": "Notes successfully compiled from browser capture!",
+            "markdown": md_text,
+            "html": html_text,
+        }
+        
+        # Clean up temp files
+        if os.path.exists(output_md):
+            try: os.remove(output_md)
+            except: pass
+        if os.path.exists(output_html):
+            try: os.remove(output_html)
+            except: pass
+            
+    except Exception as e:
+        jobs[job_id] = {
+            "status": "failed",
+            "progress": 100,
+            "message": f"Error: {str(e)}",
+            "markdown": None,
+            "html": None,
+        }
+    finally:
+        # Clean up the temporary frames directory
+        import shutil
+        if os.path.exists(frames_dir):
+            try: shutil.rmtree(frames_dir)
+            except: pass
+
+
 @app.post("/api/generate")
 def generate_notes(request: JobRequest, background_tasks: BackgroundTasks, fastapi_req: Request):
     job_id = str(uuid.uuid4())
@@ -136,6 +226,39 @@ def generate_notes(request: JobRequest, background_tasks: BackgroundTasks, fasta
     
     # Start the pipeline as a background thread task
     background_tasks.add_task(run_pipeline_task, job_id, request.url, base_url, request.cookies)
+    
+    return {"job_id": job_id}
+
+
+@app.post("/api/generate-from-capture")
+def generate_notes_from_capture(request: CaptureJobRequest, background_tasks: BackgroundTasks, fastapi_req: Request):
+    """
+    Accepts browser-captured transcript + base64-encoded keyframe images 
+    from the Chrome extension and routes them through the multimodal Gemini pipeline.
+    """
+    job_id = str(uuid.uuid4())
+    base_url = str(fastapi_req.base_url)
+    
+    # Save base64 frames to a temporary directory
+    frames_dir = f"capture_frames_{job_id}"
+    os.makedirs(frames_dir, exist_ok=True)
+    
+    for frame in request.frames:
+        try:
+            frame_data = base64.b64decode(frame.data)
+            frame_path = os.path.join(frames_dir, frame.filename)
+            with open(frame_path, "wb") as f:
+                f.write(frame_data)
+        except Exception as e:
+            print(f"Warning: Failed to save frame {frame.filename}: {e}")
+    
+    frame_count = len([f for f in os.listdir(frames_dir) if f.endswith('.jpg')])
+    print(f"[Capture] Received {frame_count} keyframes + transcript ({len(request.transcript)} chars) for {request.url}")
+    
+    # Start the multimodal pipeline as a background task
+    background_tasks.add_task(
+        run_capture_pipeline_task, job_id, request.url, base_url, request.transcript, frames_dir
+    )
     
     return {"job_id": job_id}
 
