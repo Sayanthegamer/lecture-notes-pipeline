@@ -159,7 +159,11 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Initializing Supabase application state...")
     if SUPABASE_URL and SUPABASE_KEY:
-        await reset_stuck_jobs_on_startup()
+        try:
+            await reset_stuck_jobs_on_startup()
+        except Exception as e:
+            logger.error(f"Non-fatal error during startup job reset: {e}. Server will continue booting.")
+            
         global _queue_worker_task
         _queue_worker_task = asyncio.create_task(queue_worker())
     

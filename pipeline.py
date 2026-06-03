@@ -16,10 +16,11 @@ import shutil
 _active_subprocesses = []
 _process_lock = asyncio.Lock()
 
-async def run_subprocess_async(command, **kwargs):
+async def run_subprocess_async(command, timeout=600, **kwargs):
     """
     Async wrapper for subprocess execution that tracks active processes for graceful termination.
     Handles 'check=True' behavior if provided.
+    Includes a timeout to prevent hanging zombie processes.
     """
     check = kwargs.pop('check', False)
     
@@ -33,10 +34,16 @@ async def run_subprocess_async(command, **kwargs):
         _active_subprocesses.append(proc)
     
     try:
-        returncode = await proc.wait()
+        returncode = await asyncio.wait_for(proc.wait(), timeout=timeout)
         if check and returncode != 0:
             raise Exception(f"Command '{' '.join(command)}' returned non-zero exit status {returncode}.")
         return proc
+    except asyncio.TimeoutError:
+        try:
+            proc.terminate()
+        except:
+            pass
+        raise Exception(f"Command '{' '.join(command)}' timed out after {timeout} seconds.")
     finally:
         async with _process_lock:
             if proc in _active_subprocesses:
@@ -918,19 +925,35 @@ async def run_capture_pipeline_async(job_id: str, workspace_dir: str, transcript
             cleaned_text = response.text if response.text else ""
             previous_context = cleaned_text[-2000:] if cleaned_text else ""
             
-            # Copy embedded keyframe images to notes_media and rewrite paths
+            # Upload embedded keyframe images to Supabase Storage and rewrite paths
             image_links = re.findall(r'!\[(.*?)]\(((?:.*?/)?(frame_\d{3}_time_.*?\.jpg))\)', cleaned_text)
             if image_links:
-                media_dir = "./notes_media"
-                os.makedirs(media_dir, exist_ok=True)
                 for alt_text, full_path_in_link, filename in image_links:
                     src_path = os.path.join(workspace_dir, filename)
-                    dst_path = os.path.join(media_dir, filename)
                     if os.path.exists(src_path):
-                        if not os.path.exists(dst_path):
-                            await asyncio.to_thread(shutil.copy, src_path, dst_path)
-                        relative_link = f"./notes_media/{filename}"
-                        cleaned_text = cleaned_text.replace(f"({full_path_in_link})", f"({relative_link})")
+                        unique_filename = f"{job_id}_{filename}"
+                        with open(src_path, "rb") as f:
+                            file_bytes = f.read()
+                            
+                        def _upload_sb():
+                            try:
+                                main.supabase.storage.from_("lecture_media").upload(
+                                    file=file_bytes, 
+                                    path=unique_filename,
+                                    file_options={"content-type": "image/jpeg"}
+                                )
+                            except Exception as ex:
+                                if "Duplicate" in str(ex):
+                                    pass # ignore if already uploaded
+                                else:
+                                    logger.warning(f"[{job_id}] Failed to upload image {filename} to Supabase: {ex}")
+                        await asyncio.to_thread(_upload_sb)
+                        
+                        def _get_url():
+                            return main.supabase.storage.from_("lecture_media").get_public_url(unique_filename)
+                        public_url = await asyncio.to_thread(_get_url)
+                        
+                        cleaned_text = cleaned_text.replace(f"({full_path_in_link})", f"({public_url})")
             
             md_text += f"## Segment: {start_time_str} - {end_time_str}\n\n{cleaned_text}\n\n---\n\n"
             logger.info(f"[{job_id}] Successfully generated notes for capture segment {i}")
