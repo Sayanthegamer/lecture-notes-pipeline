@@ -65,6 +65,7 @@ def extract_lecture_keyframes(video_path, output_dir, interval_seconds=45):
         
         command = [
             "ffmpeg", "-y",
+            "-nostdin",
             "-loglevel", "error",
             "-ss", str(time_sec),
             "-i", video_path,
@@ -141,6 +142,7 @@ def extract_audio_slice(video_path, audio_output_path, start_sec, duration_sec):
         
     command = [
         "ffmpeg", "-y",
+        "-nostdin",
         "-ss", str(start_sec),             # Seek start position
         "-t", str(duration_sec),           # Duration to extract
         "-i", video_path,
