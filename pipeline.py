@@ -38,39 +38,53 @@ def format_time(seconds):
 def extract_lecture_keyframes(video_path, output_dir, interval_seconds=45):
     """
     Step 1: Extract keyframes from video using FFmpeg at a fixed time interval.
-    This is extremely fast, avoids OpenCV seeking/reading bugs on large files, and is 100% stable.
+    Uses fast seeking (-ss before -i) for near-instantaneous extraction on CPU-constrained servers.
     """
     print(f"--- Step 1: Extracting visual keyframes via FFmpeg (1 frame every {interval_seconds}s) ---")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         
-    # FFmpeg command to extract frames at 1/interval_seconds fps, scaled to 1280px width
-    command = [
-        "ffmpeg", "-y",
-        "-loglevel", "error",
-        "-i", video_path,
-        "-vf", f"fps=1/{interval_seconds},scale=1280:-1",
-        "-q:v", "2",  # Quality factor (2 is very high quality, small file size)
-        os.path.join(output_dir, "frame_%04d.jpg")
-    ]
-    try:
-        # Show output so the user can see progress during extraction
-        subprocess.run(command, check=True)
-        
-        # Rename the files to include timestamp for Gemini alignment
-        extracted_files = sorted(glob.glob(os.path.join(output_dir, "frame_*.jpg")))
-        for i, file_path in enumerate(extracted_files):
-            # Frame index is 1-based from FFmpeg (frame_0001.jpg, frame_0002.jpg...)
-            time_sec = i * interval_seconds
-            timestamp_str = format_time(time_sec).replace(':', '_')
-            new_path = os.path.join(output_dir, f"frame_{i:03d}_time_{timestamp_str}.jpg")
-            os.rename(file_path, new_path)
-            
-        print(f"Keyframe extraction complete. Total frames saved: {len(extracted_files)}")
-        return len(extracted_files)
-    except Exception as e:
-        print(f"FFmpeg frame extraction failed: {e}")
+    import cv2
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    if not fps or fps <= 0 or not frame_count:
+        print("Error: Could not retrieve video duration for keyframe extraction.")
+        cap.release()
         return 0
+    duration_sec = frame_count / fps
+    cap.release()
+
+    extracted_count = 0
+    time_sec = 0.0
+    frame_index = 0
+
+    while time_sec < duration_sec:
+        timestamp_str = format_time(time_sec).replace(':', '_')
+        output_file = os.path.join(output_dir, f"frame_{frame_index:03d}_time_{timestamp_str}.jpg")
+        
+        command = [
+            "ffmpeg", "-y",
+            "-loglevel", "error",
+            "-ss", str(time_sec),
+            "-i", video_path,
+            "-vframes", "1",
+            "-vf", "scale=1280:-1",
+            "-q:v", "2",
+            output_file
+        ]
+        
+        try:
+            subprocess.run(command, check=True)
+            extracted_count += 1
+        except Exception as e:
+            print(f"Failed to extract frame at {time_sec}s: {e}")
+            
+        time_sec += interval_seconds
+        frame_index += 1
+
+    print(f"Keyframe extraction complete. Total frames saved: {extracted_count}")
+    return extracted_count
 
 
 def find_subtitle_file(video_path):
