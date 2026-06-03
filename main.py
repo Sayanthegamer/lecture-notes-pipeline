@@ -2,15 +2,209 @@ import os
 import uuid
 import sys
 import base64
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+import time
+import asyncio
+import contextlib
+import logging
+from urllib.parse import urlparse
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
+from supabase import create_client, Client
 import pipeline
+import shutil
 
-app = FastAPI(title="Lecture Notes Scribe API")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("lecture_notes_scribe")
 
-# Enable CORS so the Vercel frontend can make API calls to Render
+# Supabase Initialization
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError(
+        "SUPABASE_URL and SUPABASE_KEY environment variables must be set. "
+        "The application requires Supabase for distributed state and storage, and cannot start without them. "
+        "Choice: Fail fast (RuntimeError raised)."
+    )
+    
+# Initialize standard sync client (we will wrap calls in asyncio.to_thread)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Background task control
+_queue_worker_task = None
+_shutdown_event = asyncio.Event()
+
+async def async_update_job_in_db(job_id: str, updates: dict):
+    """Non-blocking update to Supabase"""
+    def _update():
+        return supabase.table('jobs').update(updates).eq('job_id', job_id).execute()
+    try:
+        await asyncio.to_thread(_update)
+    except Exception as e:
+        logger.error(f"Failed to update job {job_id} in DB: {e}")
+
+async def async_insert_job_in_db(job_id: str, status: str, progress: int, message: str, url: str):
+    """Non-blocking insert to Supabase"""
+    def _insert():
+        data = {
+            "job_id": job_id,
+            "status": status,
+            "progress": progress,
+            "message": message,
+            "url": url,
+            "markdown": None,
+            "html": None
+        }
+        return supabase.table('jobs').insert(data).execute()
+    try:
+        await asyncio.to_thread(_insert)
+    except Exception as e:
+        logger.error(f"Failed to insert job {job_id} in DB: {e}")
+
+async def reset_stuck_jobs_on_startup():
+    """Reset jobs that were processing during a server crash back to queued, and fail capture jobs"""
+    def _reset():
+        # First fail all capture jobs that were processing (they don't have full URLs or they relied on ephemeral disk)
+        # Assuming we can't reliably retry capture jobs because their frames were deleted on server restart.
+        # We'll just set all processing jobs to queued. If a capture job is retried, its folder is gone and it will fail immediately.
+        try:
+            supabase.table('jobs').update({"status": "queued"}).eq('status', 'processing').execute()
+            logger.info("Successfully reset 'processing' jobs back to 'queued'.")
+        except Exception as e:
+            logger.error(f"Failed to reset stuck jobs: {e}")
+    await asyncio.to_thread(_reset)
+
+async def queue_worker():
+    """Background FIFO queue worker pulling from Supabase Postgres"""
+    logger.info("Started Supabase FIFO queue worker.")
+    while not _shutdown_event.is_set():
+        try:
+            def _fetch_next_job():
+                res = supabase.table('jobs').select('*').eq('status', 'queued').order('created_at').limit(1).execute()
+                return res.data[0] if res.data else None
+
+            job = await asyncio.to_thread(_fetch_next_job)
+            
+            if job:
+                job_id = job['job_id']
+                logger.info(f"Queue worker picked up job: {job_id}")
+                
+                # Mark as processing
+                await async_update_job_in_db(job_id, {"status": "processing"})
+                
+                # We need to determine if it's a capture job or a standard YouTube URL.
+                # If it's a standard URL, run standard pipeline.
+                # If it was a capture job, its frames were stored locally. If the server restarted, the frames are gone.
+                workspace_dir = f"./tmp/lecture_pipeline_{job_id}"
+                parsed_url = urlparse(job['url'])
+                host = (parsed_url.hostname or "").lower()
+
+                if host in {"youtube.com", "www.youtube.com", "youtu.be"}:
+                    # Standard YouTube Job
+                    await pipeline.run_pipeline_task_async(job_id, job['url'])
+                else:
+                    # Capture Job (or unknown). If workspace exists, it's an active capture job on this server.
+                    if os.path.exists(workspace_dir):
+                        try:
+                            # Read transcript from workspace
+                            transcript_path = os.path.join(workspace_dir, "transcript.txt")
+                            if os.path.exists(transcript_path):
+                                with open(transcript_path, "r", encoding="utf-8") as f:
+                                    transcript_text = f.read()
+                            else:
+                                transcript_text = ""
+                            
+                            # Call the capture pipeline handler
+                            md_text, html_text = await pipeline.run_capture_pipeline_async(job_id, workspace_dir, transcript_text, job['url'])
+                            
+                            # Update job status to completed
+                            await async_update_job_in_db(job_id, {
+                                "status": "completed",
+                                "progress": 100,
+                                "message": "Notes successfully compiled from browser capture!",
+                                "markdown": md_text,
+                                "html": html_text
+                            })
+                        except Exception as e:
+                            logger.error(f"Capture pipeline processing failed for job {job_id}: {e}")
+                            await async_update_job_in_db(job_id, {
+                                "status": "failed",
+                                "progress": 100,
+                                "message": f"Capture pipeline failed: {str(e)}"
+                            })
+                        finally:
+                            # Clean up the temporary workspace directory
+                            if os.path.exists(workspace_dir):
+                                try:
+                                    shutil.rmtree(workspace_dir)
+                                except OSError as cleanup_err:
+                                    logger.warning(f"Failed to cleanup workspace {workspace_dir}: {cleanup_err}")
+                    else:
+                        await async_update_job_in_db(job_id, {"status": "failed", "message": "Capture job lost due to server restart or missing payload."})
+                    
+            else:
+                # No queued jobs, sleep briefly
+                await asyncio.sleep(5)
+                
+        except Exception as e:
+            logger.error(f"Queue worker encountered error: {e}")
+            await asyncio.sleep(5)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Initializing Supabase application state...")
+    if SUPABASE_URL and SUPABASE_KEY:
+        try:
+            await reset_stuck_jobs_on_startup()
+        except Exception as e:
+            logger.error(f"Non-fatal error during startup job reset: {e}. Server will continue booting.")
+            
+        global _queue_worker_task
+        _queue_worker_task = asyncio.create_task(queue_worker())
+    
+    yield
+    
+    # Shutdown
+    logger.info("Server shutting down, cleaning up active async subprocesses...")
+    _shutdown_event.set()
+    
+    async with pipeline._process_lock:
+        for proc in list(pipeline._active_subprocesses):
+            try:
+                proc.terminate()
+            except Exception as e:
+                logger.warning(f"Failed to terminate process {proc.pid}: {e}")
+                
+    await asyncio.sleep(1) # Brief async wait for processes to die
+    
+    async with pipeline._process_lock:
+        for proc in list(pipeline._active_subprocesses):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+app = FastAPI(title="Lecture Notes Scribe API (Cloud-Native)", lifespan=lifespan)
+
+# Setup API Key Security
+API_KEY = os.getenv("API_KEY", "REQUIRE_ENV_API_KEY")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
+
+def get_api_key(api_key_header: str = Security(api_key_header)):
+    if API_KEY == "REQUIRE_ENV_API_KEY":
+        raise HTTPException(
+            status_code=500,
+            detail="API_KEY environment variable is not configured on the server."
+        )
+    if api_key_header == API_KEY:
+        return api_key_header
+    raise HTTPException(status_code=403, detail="Could not validate API KEY")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,13 +212,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Ensure notes_media directory exists and mount it to serve images statically
-os.makedirs("notes_media", exist_ok=True)
-app.mount("/notes_media", StaticFiles(directory="notes_media"), name="notes_media")
-
-# In-memory dictionary to track job statuses
-jobs = {}
 
 class JobRequest(BaseModel):
     url: str
@@ -40,249 +227,134 @@ class CaptureJobRequest(BaseModel):
     transcript: str
     frames: list[CaptureFrame] = []
 
-def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = None):
-    jobs[job_id] = {
-        "status": "processing",
-        "progress": 10,
-        "message": "Downloading video from YouTube...",
-        "markdown": None,
-        "html": None,
-    }
-    
-    def update_progress(progress_val, message_text):
-        if job_id in jobs:
-            jobs[job_id]["progress"] = progress_val
-            jobs[job_id]["message"] = message_text
-
-    cookies_file = f"cookies_{job_id}.txt" if cookies_text else None
-    
-    try:
-        try:
-            # Write cookies if provided
-            if cookies_file and cookies_text:
-                with open(cookies_file, "w", encoding="utf-8") as f:
-                    f.write(cookies_text)
-                    
-            # Output filenames
-            output_md = f"notes_{job_id}.md"
-            output_html = f"notes_{job_id}.html"
-
-            # 1. Download YouTube video
-            vid_file = pipeline.download_youtube_video(url, cookies_file=cookies_file)
-            
-            if vid_file:
-                jobs[job_id]["progress"] = 30
-                jobs[job_id]["message"] = "Extracting keyframes and audio slices..."
-                
-                # 2. Run the main processing pipeline (Multimodal)
-                pipeline.run_pipeline(vid_file, output_md, threshold=0.10, cooldown_seconds=30, progress_callback=update_progress)
-            else:
-                jobs[job_id]["progress"] = 25
-                jobs[job_id]["message"] = "Download blocked. Fetching transcript directly from YouTube..."
-                
-                # Fallback: Retrieve transcript text only
-                transcript_text = pipeline.fetch_youtube_transcript_fallback(url)
-                if not transcript_text:
-                    raise Exception("YouTube download failed and no transcript could be retrieved.")
-                    
-                jobs[job_id]["progress"] = 50
-                jobs[job_id]["message"] = "Compiling textbook study notes from transcript..."
-                
-                # 2. Run the transcript-only processing pipeline
-                pipeline.run_pipeline_transcript_only(url, transcript_text, output_md, progress_callback=update_progress)
-                
-            # 3. Read generated output files
-            if os.path.exists(output_md):
-                with open(output_md, "r", encoding="utf-8") as f:
-                    md_text = f.read()
-            else:
-                raise Exception("Notes generation failed (Markdown not found).")
-                
-            if os.path.exists(output_html):
-                with open(output_html, "r", encoding="utf-8") as f:
-                    html_text = f.read()
-            else:
-                html_text = ""
-                
-            # 4. Rewrite relative image paths to point to Render's absolute static url
-            backend_media_url = f"{base_url}notes_media/"
-            if md_text:
-                md_text = md_text.replace("./notes_media/", backend_media_url)
-            if html_text:
-                html_text = html_text.replace("./notes_media/", backend_media_url)
-                
-            jobs[job_id] = {
-                "status": "completed",
-                "progress": 100,
-                "message": "Notes successfully compiled!",
-                "markdown": md_text,
-                "html": html_text,
-            }
-            
-            # Clean up temporary video/markdown files
-            if vid_file and os.path.exists(vid_file):
-                try: os.remove(vid_file)
-                except: pass
-            if os.path.exists(output_md):
-                try: os.remove(output_md)
-                except: pass
-            if os.path.exists(output_html):
-                try: os.remove(output_html)
-                except: pass
-                
-        except Exception as e:
-            jobs[job_id] = {
-                "status": "failed",
-                "progress": 100,
-                "message": f"Error: {str(e)}",
-                "markdown": None,
-                "html": None,
-            }
-    finally:
-        # Secure cleanup of temporary cookies file
-        if cookies_file and os.path.exists(cookies_file):
-            try: os.remove(cookies_file)
-            except: pass
-
-
-def run_capture_pipeline_task(job_id: str, url: str, base_url: str, transcript: str, frames_dir: str):
-    """
-    Background task for processing Chrome extension-captured data.
-    Uses the multimodal pipeline with pre-captured keyframes + transcript.
-    """
-    jobs[job_id] = {
-        "status": "processing",
-        "progress": 20,
-        "message": "Processing captured keyframes and transcript...",
-        "markdown": None,
-        "html": None,
-    }
-    
-    def update_progress(progress_val, message_text):
-        if job_id in jobs:
-            jobs[job_id]["progress"] = progress_val
-            jobs[job_id]["message"] = message_text
-
-    try:
-        output_md = f"notes_{job_id}.md"
-        output_html = f"notes_{job_id}.html"
-        
-        jobs[job_id]["progress"] = 30
-        jobs[job_id]["message"] = "Compiling multimodal study notes with Gemini..."
-        
-        # Run the capture-based multimodal pipeline
-        success = pipeline.run_pipeline_from_capture(url, transcript, frames_dir, output_md, progress_callback=update_progress)
-        
-        if not success:
-            raise Exception("Multimodal pipeline processing failed.")
-        
-        # Read generated output files
-        if os.path.exists(output_md):
-            with open(output_md, "r", encoding="utf-8") as f:
-                md_text = f.read()
-        else:
-            raise Exception("Notes generation failed (Markdown not found).")
-            
-        if os.path.exists(output_html):
-            with open(output_html, "r", encoding="utf-8") as f:
-                html_text = f.read()
-        else:
-            html_text = ""
-            
-        # Rewrite relative image paths to point to Render's absolute static url
-        backend_media_url = f"{base_url}notes_media/"
-        if md_text:
-            md_text = md_text.replace("./notes_media/", backend_media_url)
-        if html_text:
-            html_text = html_text.replace("./notes_media/", backend_media_url)
-            
-        jobs[job_id] = {
-            "status": "completed",
-            "progress": 100,
-            "message": "Notes successfully compiled from browser capture!",
-            "markdown": md_text,
-            "html": html_text,
-        }
-        
-        # Clean up temp files
-        if os.path.exists(output_md):
-            try: os.remove(output_md)
-            except: pass
-        if os.path.exists(output_html):
-            try: os.remove(output_html)
-            except: pass
-            
-    except Exception as e:
-        jobs[job_id] = {
-            "status": "failed",
-            "progress": 100,
-            "message": f"Error: {str(e)}",
-            "markdown": None,
-            "html": None,
-        }
-    finally:
-        # Clean up the temporary frames directory
-        import shutil
-        if os.path.exists(frames_dir):
-            try: shutil.rmtree(frames_dir)
-            except: pass
-
-
-@app.post("/api/generate")
-def generate_notes(request: JobRequest, background_tasks: BackgroundTasks, fastapi_req: Request):
+@app.post("/api/generate", dependencies=[Depends(get_api_key)])
+async def generate_notes(request: JobRequest):
     job_id = str(uuid.uuid4())
-    # Capture the Render base URL dynamically
-    base_url = str(fastapi_req.base_url)
     
-    # Start the pipeline as a background thread task
-    background_tasks.add_task(run_pipeline_task, job_id, request.url, base_url, request.cookies)
+    # Initialize job in Supabase queue
+    await async_insert_job_in_db(job_id, "queued", 0, "Queued for processing...", request.url)
     
+    # We will write cookies to disk if provided, so the worker can pick them up.
+    # A cloud-native way is to store cookies in the DB, but local disk `tmp` is fine if single instance.
+    if request.cookies:
+        workspace_dir = f"./tmp/lecture_pipeline_{job_id}"
+        os.makedirs(workspace_dir, exist_ok=True)
+        with open(os.path.join(workspace_dir, "cookies.txt"), "w", encoding="utf-8") as f:
+            f.write(request.cookies)
+            
     return {"job_id": job_id}
 
 
-@app.post("/api/generate-from-capture")
-def generate_notes_from_capture(request: CaptureJobRequest, background_tasks: BackgroundTasks, fastapi_req: Request):
-    """
-    Accepts browser-captured transcript + base64-encoded keyframe images 
-    from the Chrome extension and routes them through the multimodal Gemini pipeline.
-    """
+@app.post("/api/generate-from-capture", dependencies=[Depends(get_api_key)])
+async def generate_notes_from_capture(request: CaptureJobRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
-    base_url = str(fastapi_req.base_url)
     
-    # Save base64 frames to a temporary directory
-    frames_dir = f"capture_frames_{job_id}"
-    os.makedirs(frames_dir, exist_ok=True)
+    workspace_dir = f"./tmp/lecture_pipeline_{job_id}"
+    os.makedirs(workspace_dir, exist_ok=True)
     
-    for frame in request.frames:
-        try:
+    try:
+        for frame in request.frames:
             frame_data = base64.b64decode(frame.data)
-            frame_path = os.path.join(frames_dir, frame.filename)
+            frame_path = os.path.join(workspace_dir, frame.filename)
             with open(frame_path, "wb") as f:
                 f.write(frame_data)
-        except Exception as e:
-            print(f"Warning: Failed to save frame {frame.filename}: {e}")
-    
-    frame_count = len([f for f in os.listdir(frames_dir) if f.endswith('.jpg')])
-    print(f"[Capture] Received {frame_count} keyframes + transcript ({len(request.transcript)} chars) for {request.url}")
-    
-    # Start the multimodal pipeline as a background task
-    background_tasks.add_task(
-        run_capture_pipeline_task, job_id, request.url, base_url, request.transcript, frames_dir
-    )
+        
+        # Save the transcript to disk so the async queue worker can use it
+        with open(os.path.join(workspace_dir, "transcript.txt"), "w", encoding="utf-8") as f:
+            f.write(request.transcript)
+            
+        # Initialize job in Supabase queue
+        # For capture jobs, we pass a special URL marker so the worker knows it's a capture job
+        marker_url = f"capture://{request.url}"
+        await async_insert_job_in_db(job_id, "queued", 0, "Queued for processing...", marker_url)
+        
+    except Exception as e:
+        if os.path.exists(workspace_dir):
+            try:
+                shutil.rmtree(workspace_dir)
+            except OSError as cleanup_err:
+                logger.warning(f"Failed to cleanup workspace {workspace_dir} on initialization failure: {cleanup_err}")
+        raise HTTPException(status_code=500, detail=f"Failed to initialize job: {str(e)}")
     
     return {"job_id": job_id}
 
 @app.get("/api/status/{job_id}")
-def get_status(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return jobs[job_id]
+async def get_status(job_id: str):
+    def _fetch():
+        res = supabase.table('jobs').select('*').eq('job_id', job_id).execute()
+        return res.data[0] if res.data else None
+        
+    try:
+        row = await asyncio.to_thread(_fetch)
+        if not row:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Mount the static frontend at the root (html=True serves index.html at '/')
-# This must be mounted at the very end so it doesn't shadow /api or /notes_media routes
+@app.post("/api/internal/evict-storage", dependencies=[Depends(get_api_key)])
+async def evict_storage():
+    """
+    Cron-triggered endpoint to delete old DB records and media files 
+    older than 7 days from Supabase to prevent storage bloat.
+    """
+    try:
+        # Delete from Postgres
+        def _delete_db_records():
+            # Get old jobs to know which files to delete.
+            # Supabase Python SDK doesn't natively support < operator in delete,
+            # so we select first or use a raw query/RPC if complex. 
+            # We can select rows older than 7 days:
+            seven_days_ago = (time.time() - (7 * 24 * 60 * 60))
+            seven_days_ago_iso = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(seven_days_ago))
+            
+            res = supabase.table('jobs').select('job_id').lt('created_at', seven_days_ago_iso).execute()
+            old_jobs = [r['job_id'] for r in res.data] if res.data else []
+            
+            if old_jobs:
+                # Delete rows
+                supabase.table('jobs').delete().in_('job_id', old_jobs).execute()
+                
+            return old_jobs
+            
+        old_job_ids = await asyncio.to_thread(_delete_db_records)
+        
+        # Delete from Storage Bucket
+        # List all files in the bucket, then delete those belonging to old jobs.
+        # Job images are named frame_..._time_....jpg, so we might need a standard prefix
+        # We can just list bucket and delete files older than 7 days using file metadata if available,
+        # but supabase storage list returns created_at.
+        evicted_count = 0
+        def _delete_storage_files():
+            nonlocal evicted_count
+            res = supabase.storage.from_("lecture_media").list()
+            # res is a list of dictionaries with 'name', 'created_at' etc.
+            seven_days_ago_iso = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(time.time() - (7 * 24 * 60 * 60)))
+            files_to_delete = []
+            for file_info in res:
+                # file_info['created_at'] is ISO8601 string
+                if file_info.get('created_at', '2099') < seven_days_ago_iso:
+                    if file_info['name'] != '.emptyFolderPlaceholder':
+                        files_to_delete.append(file_info['name'])
+                        
+            if files_to_delete:
+                # Delete in chunks of 100
+                for i in range(0, len(files_to_delete), 100):
+                    chunk = files_to_delete[i:i+100]
+                    supabase.storage.from_("lecture_media").remove(chunk)
+                    evicted_count += len(chunk)
+                    
+        await asyncio.to_thread(_delete_storage_files)
+            
+        return {"status": "success", "evicted_db_records": len(old_job_ids), "evicted_files": evicted_count}
+    except Exception as e:
+        logger.error(f"Eviction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
-# Bind to the PORT environment variable provided by Render
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))

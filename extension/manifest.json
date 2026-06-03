@@ -7,7 +7,9 @@
     "activeTab",
     "storage",
     "scripting",
-    "cookies"
+    "cookies",
+    "alarms",
+    "notifications"
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
@@ -21,6 +23,9 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
+  },
+  "background": {
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {

@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const settingsPanel = document.getElementById('settings-panel');
     const backendUrlInput = document.getElementById('backend-url');
     const frameIntervalInput = document.getElementById('frame-interval');
+    const apiKeyInput = document.getElementById('api-key');
     const saveSettingsBtn = document.getElementById('save-settings');
 
     const videoDetected = document.getElementById('video-detected');
@@ -67,9 +68,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     let activeTabId = null;
 
     // ─── Load Settings ───
-    const settings = await chrome.storage.sync.get(['backendUrl', 'frameInterval']);
-    backendUrlInput.value = settings.backendUrl || 'https://lecture-notes-pipeline.onrender.com/';
-    frameIntervalInput.value = settings.frameInterval || 30;
+    const syncSettings = await chrome.storage.sync.get(['backendUrl', 'frameInterval']);
+    const localSettings = await chrome.storage.local.get(['apiKey']);
+    
+    backendUrlInput.value = syncSettings.backendUrl || 'https://lecture-notes-pipeline.onrender.com/';
+    frameIntervalInput.value = syncSettings.frameInterval || 30;
+    if (apiKeyInput) {
+        apiKeyInput.value = localSettings.apiKey || '';
+    }
+
+    // ─── Proactive API Key Validation ───
+    function validateApiKey() {
+        if (!apiKeyInput.value.trim()) {
+            captureBtn.disabled = true;
+            if (serverBtn) serverBtn.disabled = true;
+            errorMessage.textContent = "Please open Settings and configure your API Key first.";
+            errorSection.classList.remove('hidden');
+            return false;
+        }
+        errorSection.classList.add('hidden');
+        return true;
+    }
 
     // ─── Settings Toggle ───
     settingsToggle.addEventListener('click', () => {
@@ -85,8 +104,17 @@ document.addEventListener('DOMContentLoaded', async () => {
             backendUrl: url,
             frameInterval: parseInt(frameIntervalInput.value) || 30
         });
+        await chrome.storage.sync.remove('apiKey');
+
+        await chrome.storage.local.set({
+            apiKey: apiKeyInput ? apiKeyInput.value.trim() : ''
+        });
 
         settingsPanel.classList.add('hidden');
+        validateApiKey();
+        if (currentVideoInfo) {
+            showVideoDetected(currentVideoInfo); // re-evaluate button state
+        }
     });
 
     // ─── Detect Current Tab's Video ───
@@ -138,8 +166,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         videoTitle.textContent = info.title || 'Untitled Video';
         videoDuration.textContent = `⏱ ${info.durationFormatted || '--:--:--'}`;
         videoIdDisplay.textContent = `🔗 ${info.videoId || '---'}`;
-        captureBtn.disabled = false;
-        if (serverBtn) serverBtn.disabled = false;
+        
+        if (validateApiKey()) {
+            captureBtn.disabled = false;
+            if (serverBtn) serverBtn.disabled = false;
+        }
     }
 
     function showNoVideo() {
@@ -403,10 +434,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }))
             };
 
+            const { apiKey = '' } = await chrome.storage.local.get(['apiKey']);
             const apiUrl = `${backendUrl}api/generate-from-capture`;
             const response = await fetch(apiUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'X-API-Key': apiKey
+                },
                 body: JSON.stringify(payload)
             });
 
@@ -424,22 +459,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             // ── Step 4: Poll for Generation Result ──
             setStep('generate', 'active', 'Processing...');
 
-            const result = await pollJobStatus(backendUrl, jobId, false);
-
-            if (result.status === 'completed') {
-                setStep('generate', 'done', 'Complete');
-                setProgress(100, 'Notes generated successfully!');
-
-                storedMarkdown = result.markdown || '';
-                storedHtml = result.html || '';
-
-                resultInfo.textContent = `Generated ${storedMarkdown.length.toLocaleString()} characters of study notes.`;
-                resultSection.classList.remove('hidden');
-                progressSection.classList.add('hidden');
-            } else {
-                setStep('generate', 'error', 'Failed');
-                throw new Error(result.message || 'Notes generation failed on the server.');
-            }
+            chrome.runtime.sendMessage({ action: 'startJob', jobId, backendUrl, apiKey });
+            await pollJobStatus(backendUrl, jobId, false, apiKey);
 
         } catch (error) {
             console.error('Pipeline error:', error);
@@ -492,10 +513,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                 throw new Error('Backend URL is not configured. Open settings and enter your Render URL.');
             }
 
+            const { apiKey = '' } = await chrome.storage.local.get(['apiKey']);
             // POST to api/generate with URL + cookies
             const response = await fetch(`${backendUrl}api/generate`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'X-API-Key': apiKey
+                },
                 body: JSON.stringify({
                     url: currentVideoInfo.url,
                     cookies: cookiesText || null
@@ -515,22 +540,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // ── Step 2: Poll status ──
             setStep('generate', 'active', 'Processing...');
-            const result = await pollJobStatus(backendUrl, jobId, true); // true for isServerFlow
-
-            if (result.status === 'completed') {
-                setStep('generate', 'done', 'Complete');
-                setProgress(100, 'Notes compiled successfully!');
-
-                storedMarkdown = result.markdown || '';
-                storedHtml = result.html || '';
-
-                resultInfo.textContent = `Generated ${storedMarkdown.length.toLocaleString()} characters of study notes.`;
-                resultSection.classList.remove('hidden');
-                progressSection.classList.add('hidden');
-            } else {
-                setStep('generate', 'error', 'Failed');
-                throw new Error(result.message || 'Server-side notes compilation failed.');
-            }
+            
+            chrome.runtime.sendMessage({ action: 'startJob', jobId, backendUrl, apiKey });
+            await pollJobStatus(backendUrl, jobId, true, apiKey); // true for isServerFlow
 
         } catch (error) {
             console.error('Server pipeline error:', error);
@@ -585,34 +597,66 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // ─── Poll Job Status ───
-    async function pollJobStatus(backendUrl, jobId, isServerFlow = false) {
+    async function pollJobStatus(backendUrl, jobId, isServerFlow = false, apiKey = '') {
         const pollInterval = 5000; // 5 seconds
         const maxAttempts = 360;   // 30 minutes max
+        let currentStatus = 'processing';
 
-        for (let i = 0; i < maxAttempts; i++) {
+        for (let i = 0; i < maxAttempts && currentStatus === 'processing'; i++) {
             await new Promise(r => setTimeout(r, pollInterval));
 
             try {
-                const response = await fetch(`${backendUrl}api/status/${jobId}`);
+                const response = await fetch(`${backendUrl}api/status/${jobId}`, {
+                    headers: { 'X-API-Key': apiKey }
+                });
                 if (!response.ok) continue;
 
                 const data = await response.json();
+                currentStatus = data.status;
 
-                // Update progress
-                const genProgress = isServerFlow ? data.progress : (50 + (data.progress / 100) * 50); // Scale 0-100 to 50-100
-                setProgress(genProgress, data.message);
-                setStep('generate', 'active', `${data.progress}%`);
-
-                if (data.status === 'completed' || data.status === 'failed') {
-                    return data;
-                }
+                // Sync state to local storage for the UI to pick up via the listener below
+                await chrome.storage.local.set({
+                    jobStatus: data.status,
+                    jobProgress: data.progress,
+                    jobMessage: data.message,
+                    jobMarkdown: data.markdown,
+                    jobHtml: data.html
+                });
             } catch (e) {
                 setProgress(null, 'Connection lost. Retrying...');
             }
         }
-
-        return { status: 'failed', message: 'Timed out waiting for notes generation.' };
     }
+
+    // ─── Listen for storage changes to render UI statelessly ───
+    chrome.storage.onChanged.addListener((changes, namespace) => {
+        if (namespace === 'local' && progressSection && !progressSection.classList.contains('hidden')) {
+            if (changes.jobProgress || changes.jobMessage || changes.jobStatus) {
+                chrome.storage.local.get(['jobProgress', 'jobMessage', 'jobStatus', 'jobMarkdown', 'jobHtml'], (data) => {
+                    const rawProgress = data.jobProgress || 0;
+                    setProgress(rawProgress, data.jobMessage);
+                    
+                    if (data.jobStatus === 'processing') {
+                        setStep('generate', 'active', `${rawProgress}%`);
+                    } else if (data.jobStatus === 'completed') {
+                        setStep('generate', 'done', 'Complete');
+                        setProgress(100, 'Notes compiled successfully!');
+        
+                        storedMarkdown = data.jobMarkdown || '';
+                        storedHtml = data.jobHtml || '';
+        
+                        resultInfo.textContent = `Generated ${storedMarkdown.length.toLocaleString()} characters of study notes.`;
+                        resultSection.classList.remove('hidden');
+                        progressSection.classList.add('hidden');
+                    } else if (data.jobStatus === 'failed') {
+                        setStep('generate', 'error', 'Failed');
+                        errorMessage.textContent = data.jobMessage || 'Server-side notes compilation failed.';
+                        errorSection.classList.remove('hidden');
+                    }
+                });
+            }
+        }
+    });
 
     // ─── Result Actions ───
     openNotesBtn.addEventListener('click', () => {
