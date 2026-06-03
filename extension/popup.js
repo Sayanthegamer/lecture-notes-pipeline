@@ -68,11 +68,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     let activeTabId = null;
 
     // ─── Load Settings ───
-    const settings = await chrome.storage.sync.get(['backendUrl', 'frameInterval', 'apiKey']);
-    backendUrlInput.value = settings.backendUrl || 'https://lecture-notes-pipeline.onrender.com/';
-    frameIntervalInput.value = settings.frameInterval || 30;
+    const syncSettings = await chrome.storage.sync.get(['backendUrl', 'frameInterval']);
+    const localSettings = await chrome.storage.local.get(['apiKey']);
+    
+    backendUrlInput.value = syncSettings.backendUrl || 'https://lecture-notes-pipeline.onrender.com/';
+    frameIntervalInput.value = syncSettings.frameInterval || 30;
     if (apiKeyInput) {
-        apiKeyInput.value = settings.apiKey || '';
+        apiKeyInput.value = localSettings.apiKey || '';
+    }
+
+    // ─── Proactive API Key Validation ───
+    function validateApiKey() {
+        if (!apiKeyInput.value.trim()) {
+            captureBtn.disabled = true;
+            if (serverBtn) serverBtn.disabled = true;
+            errorMessage.textContent = "Please open Settings and configure your API Key first.";
+            errorSection.classList.remove('hidden');
+            return false;
+        }
+        errorSection.classList.add('hidden');
+        return true;
     }
 
     // ─── Settings Toggle ───
@@ -87,11 +102,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         await chrome.storage.sync.set({
             backendUrl: url,
-            frameInterval: parseInt(frameIntervalInput.value) || 30,
+            frameInterval: parseInt(frameIntervalInput.value) || 30
+        });
+        await chrome.storage.sync.remove('apiKey');
+
+        await chrome.storage.local.set({
             apiKey: apiKeyInput ? apiKeyInput.value.trim() : ''
         });
 
         settingsPanel.classList.add('hidden');
+        validateApiKey();
+        if (currentVideoInfo) {
+            showVideoDetected(currentVideoInfo); // re-evaluate button state
+        }
     });
 
     // ─── Detect Current Tab's Video ───
@@ -143,8 +166,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         videoTitle.textContent = info.title || 'Untitled Video';
         videoDuration.textContent = `⏱ ${info.durationFormatted || '--:--:--'}`;
         videoIdDisplay.textContent = `🔗 ${info.videoId || '---'}`;
-        captureBtn.disabled = false;
-        if (serverBtn) serverBtn.disabled = false;
+        
+        if (validateApiKey()) {
+            captureBtn.disabled = false;
+            if (serverBtn) serverBtn.disabled = false;
+        }
     }
 
     function showNoVideo() {
@@ -408,7 +434,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }))
             };
 
-            const { apiKey = '' } = await chrome.storage.sync.get(['apiKey']);
+            const { apiKey = '' } = await chrome.storage.local.get(['apiKey']);
             const apiUrl = `${backendUrl}api/generate-from-capture`;
             const response = await fetch(apiUrl, {
                 method: 'POST',
@@ -501,7 +527,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 throw new Error('Backend URL is not configured. Open settings and enter your Render URL.');
             }
 
-            const { apiKey = '' } = await chrome.storage.sync.get(['apiKey']);
+            const { apiKey = '' } = await chrome.storage.local.get(['apiKey']);
             // POST to api/generate with URL + cookies
             const response = await fetch(`${backendUrl}api/generate`, {
                 method: 'POST',

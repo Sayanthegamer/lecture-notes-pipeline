@@ -13,12 +13,35 @@ from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 import pipeline
 import shutil
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("lecture_notes_scribe")
 
-app = FastAPI(title="Lecture Notes Scribe API")
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: nothing needed
+    yield
+    # Shutdown: Clean up any active ffmpeg/yt-dlp subprocesses
+    logger.info("Server shutting down, cleaning up active subprocesses...")
+    with pipeline._process_lock:
+        for proc in list(pipeline._active_subprocesses):
+            try:
+                proc.terminate()
+            except Exception as e:
+                logger.warning(f"Failed to terminate process {proc.pid}: {e}")
+                
+    time.sleep(1) # Brief wait for processes to die
+    
+    with pipeline._process_lock:
+        for proc in list(pipeline._active_subprocesses):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+app = FastAPI(title="Lecture Notes Scribe API", lifespan=lifespan)
 
 # Setup API Key Security
 # NOTE: The same API_KEY must be configured identically on the client (popup.js) and server in production.
@@ -299,6 +322,38 @@ def get_status(job_id: str):
         if not row:
             raise HTTPException(status_code=404, detail="Job not found")
         return dict(row)
+
+@app.post("/api/internal/evict-storage", dependencies=[Depends(get_api_key)])
+def evict_storage():
+    """
+    Cron-triggered endpoint to delete old DB records and media files 
+    older than 7 days to prevent storage bloat.
+    """
+    try:
+        with get_db_connection() as conn:
+            conn.execute("DELETE FROM jobs WHERE created_at < datetime('now', '-7 days')")
+            conn.commit()
+            
+        evicted_count = 0
+        media_dir = "notes_media"
+        now = time.time()
+        seven_days_ago = now - (7 * 24 * 60 * 60)
+        
+        if os.path.exists(media_dir):
+            for filename in os.listdir(media_dir):
+                filepath = os.path.join(media_dir, filename)
+                if os.path.isfile(filepath):
+                    if os.path.getmtime(filepath) < seven_days_ago:
+                        try:
+                            os.remove(filepath)
+                            evicted_count += 1
+                        except OSError as e:
+                            logger.warning(f"Failed to evict {filepath}: {e}")
+                            
+        return {"status": "success", "evicted_files": evicted_count}
+    except Exception as e:
+        logger.error(f"Eviction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 

@@ -10,6 +10,31 @@ from google.genai import types
 from dotenv import load_dotenv
 import cv2
 import logging
+import threading
+
+# Process tracking for graceful shutdown
+_active_subprocesses = []
+_process_lock = threading.Lock()
+
+def run_subprocess(command, **kwargs):
+    """
+    Wrapper for subprocess.Popen that tracks active processes for graceful termination.
+    Handles 'check=True' behavior if provided.
+    """
+    check = kwargs.pop('check', False)
+    with _process_lock:
+        proc = subprocess.Popen(command, **kwargs)
+        _active_subprocesses.append(proc)
+    
+    try:
+        proc.wait()
+        if check and proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, command)
+        return proc
+    finally:
+        with _process_lock:
+            if proc in _active_subprocesses:
+                _active_subprocesses.remove(proc)
 
 # Load environment variables
 load_dotenv()
@@ -79,7 +104,7 @@ def extract_lecture_keyframes(video_path, output_dir, interval_seconds=45):
         ]
         
         try:
-            subprocess.run(command, check=True)
+            run_subprocess(command, check=True)
             extracted_count += 1
         except Exception as e:
             print(f"Failed to extract frame at {time_sec}s: {e}")
@@ -158,7 +183,7 @@ def extract_audio_slice(video_path, audio_output_path, start_sec, duration_sec):
         audio_output_path
     ]
     try:
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run_subprocess(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except Exception as e:
         print(f"FFmpeg audio slice extraction failed: {e}")
@@ -227,7 +252,7 @@ def download_youtube_video(url, job_id, workspace_dir, cookies_file=None):
         print(f"Trying download method {i}: {desc}...")
         try:
             # Let it show console progress
-            subprocess.run(cmd, check=True)
+            run_subprocess(cmd, check=True)
             success = True
             break
         except subprocess.CalledProcessError:
