@@ -228,7 +228,7 @@ def download_youtube_video(url, cookies_file=None):
     return None
 
 
-def run_pipeline(video_path, output_notes_path="lecture_notes.md", threshold=0.10, cooldown_seconds=30):
+def run_pipeline(video_path, output_notes_path="lecture_notes.md", threshold=0.10, cooldown_seconds=30, progress_callback=None):
     start_time = time.time()
     
     # Check Gemini API Key
@@ -311,9 +311,16 @@ def run_pipeline(video_path, output_notes_path="lecture_notes.md", threshold=0.1
         "Structure sections cleanly with Markdown headers, bullet points, numbered lists, and comparison tables."
     )
 
+    import math
+    total_chunks = max(1, math.ceil(video_duration_sec / chunk_duration_sec))
+
     while chunk_start < video_duration_sec:
         chunk_end = min(chunk_start + chunk_duration_sec, video_duration_sec)
         duration_to_extract = chunk_end - chunk_start
+        
+        if progress_callback:
+            percent = 30 + int(((chunk_index - 1) / total_chunks) * 60)
+            progress_callback(percent, f"Compiling study notes: segment {chunk_index} of {total_chunks} ({format_time(chunk_start)} to {format_time(chunk_end)})...")
         
         print(f"\n==================================================")
         print(f"Processing segment {chunk_index}: {format_time(chunk_start)} to {format_time(chunk_end)}")
@@ -479,6 +486,9 @@ def run_pipeline(video_path, output_notes_path="lecture_notes.md", threshold=0.1
     print(f"All chunks compiled! Output file: {output_notes_path}")
     print(f"Total processing completed in {elapsed:.1f} seconds.")
     
+    if progress_callback:
+        progress_callback(95, "Compiling HTML textbook preview...")
+        
     # Auto-compile HTML companion notes
     html_notes_path = os.path.splitext(output_notes_path)[0] + ".html"
     try:
@@ -931,7 +941,7 @@ def chunk_transcript(transcript_text, chunk_duration_sec=600):
     return chunks
 
 
-def run_pipeline_from_capture(youtube_url, transcript_text, frame_dir, output_notes_path, chunk_duration_sec=600, rate_limit_delay=5):
+def run_pipeline_from_capture(youtube_url, transcript_text, frame_dir, output_notes_path, chunk_duration_sec=600, rate_limit_delay=5, progress_callback=None):
     """
     Multimodal pipeline that generates notes from browser-captured data.
     Uses pre-captured keyframe images + transcript text (sent from the Chrome extension)
@@ -1003,6 +1013,10 @@ def run_pipeline_from_capture(youtube_url, transcript_text, frame_dir, output_no
         start_time_str = format_time(chunk["start_sec"])
         end_time_str = format_time(chunk["end_sec"])
         
+        if progress_callback:
+            percent = 30 + int(((i - 1) / len(chunks)) * 60)
+            progress_callback(percent, f"Compiling study notes: segment {i} of {len(chunks)} ({start_time_str} to {end_time_str})...")
+
         print(f"\nProcessing segment {i}/{len(chunks)}: {start_time_str} to {end_time_str}...")
         
         # Filter keyframes belonging to this time segment
@@ -1091,6 +1105,9 @@ def run_pipeline_from_capture(youtube_url, transcript_text, frame_dir, output_no
             print(f"Sleeping for {rate_limit_delay} seconds to stay under token rate limits...")
             time.sleep(rate_limit_delay)
             
+    if progress_callback:
+        progress_callback(95, "Compiling HTML textbook preview...")
+
     # Compile HTML companion notes
     html_notes_path = os.path.splitext(output_notes_path)[0] + ".html"
     try:
@@ -1101,7 +1118,7 @@ def run_pipeline_from_capture(youtube_url, transcript_text, frame_dir, output_no
     return True
 
 
-def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path, chunk_duration_sec=600, rate_limit_delay=5):
+def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path, chunk_duration_sec=600, rate_limit_delay=5, progress_callback=None):
     """
     Fallback pipeline that generates notes solely based on the retrieved transcript text.
     Processes the transcript in chunks to generate exhaustive, detailed study notes
@@ -1151,6 +1168,10 @@ def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path
         start_time_str = format_time(chunk["start_sec"])
         end_time_str = format_time(chunk["end_sec"])
         
+        if progress_callback:
+            percent = 50 + int(((i - 1) / len(chunks)) * 45)
+            progress_callback(percent, f"Compiling study notes: segment {i} of {len(chunks)} ({start_time_str} to {end_time_str})...")
+
         print(f"\nProcessing transcript segment {i}/{len(chunks)}: {start_time_str} to {end_time_str}...")
         
         prompt = (
@@ -1196,6 +1217,9 @@ def run_pipeline_transcript_only(youtube_url, transcript_text, output_notes_path
             print(f"Sleeping for {rate_limit_delay} seconds to stay under token rate limits...")
             time.sleep(rate_limit_delay)
             
+    if progress_callback:
+        progress_callback(95, "Compiling HTML textbook preview...")
+
     # Compile HTML companion notes
     html_notes_path = os.path.splitext(output_notes_path)[0] + ".html"
     try:

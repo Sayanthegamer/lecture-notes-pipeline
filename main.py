@@ -49,6 +49,11 @@ def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = 
         "html": None,
     }
     
+    def update_progress(progress_val, message_text):
+        if job_id in jobs:
+            jobs[job_id]["progress"] = progress_val
+            jobs[job_id]["message"] = message_text
+
     cookies_file = f"cookies_{job_id}.txt" if cookies_text else None
     
     try:
@@ -70,7 +75,7 @@ def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = 
                 jobs[job_id]["message"] = "Extracting keyframes and audio slices..."
                 
                 # 2. Run the main processing pipeline (Multimodal)
-                pipeline.run_pipeline(vid_file, output_md, threshold=0.10, cooldown_seconds=30)
+                pipeline.run_pipeline(vid_file, output_md, threshold=0.10, cooldown_seconds=30, progress_callback=update_progress)
             else:
                 jobs[job_id]["progress"] = 25
                 jobs[job_id]["message"] = "Download blocked. Fetching transcript directly from YouTube..."
@@ -84,7 +89,7 @@ def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = 
                 jobs[job_id]["message"] = "Compiling textbook study notes from transcript..."
                 
                 # 2. Run the transcript-only processing pipeline
-                pipeline.run_pipeline_transcript_only(url, transcript_text, output_md)
+                pipeline.run_pipeline_transcript_only(url, transcript_text, output_md, progress_callback=update_progress)
                 
             # 3. Read generated output files
             if os.path.exists(output_md):
@@ -153,6 +158,11 @@ def run_capture_pipeline_task(job_id: str, url: str, base_url: str, transcript: 
         "html": None,
     }
     
+    def update_progress(progress_val, message_text):
+        if job_id in jobs:
+            jobs[job_id]["progress"] = progress_val
+            jobs[job_id]["message"] = message_text
+
     try:
         output_md = f"notes_{job_id}.md"
         output_html = f"notes_{job_id}.html"
@@ -161,7 +171,7 @@ def run_capture_pipeline_task(job_id: str, url: str, base_url: str, transcript: 
         jobs[job_id]["message"] = "Compiling multimodal study notes with Gemini..."
         
         # Run the capture-based multimodal pipeline
-        success = pipeline.run_pipeline_from_capture(url, transcript, frames_dir, output_md)
+        success = pipeline.run_pipeline_from_capture(url, transcript, frames_dir, output_md, progress_callback=update_progress)
         
         if not success:
             raise Exception("Multimodal pipeline processing failed.")
