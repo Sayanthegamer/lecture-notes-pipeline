@@ -127,7 +127,15 @@ document.addEventListener('DOMContentLoaded', () => {
             statusMessage.innerText = "Job accepted! Starting processing...";
             
             // Add a 3s cold-start warning if this is Render
-            if (apiBase.includes('render.com')) {
+            let isRenderHost = false;
+            try {
+                const host = new URL(apiBase).hostname.toLowerCase();
+                isRenderHost = host === 'render.com' || host.endsWith('.render.com');
+            } catch (_) {
+                isRenderHost = false;
+            }
+
+            if (isRenderHost) {
                 setTimeout(() => {
                     if (progressPercent.innerText === "0%") {
                         statusMessage.innerText = "Server is waking up from cold start... (~50s)";
