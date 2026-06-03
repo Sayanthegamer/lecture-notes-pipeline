@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const settingsPanel = document.getElementById('settings-panel');
     const backendUrlInput = document.getElementById('backend-url');
     const frameIntervalInput = document.getElementById('frame-interval');
+    const apiKeyInput = document.getElementById('api-key');
     const saveSettingsBtn = document.getElementById('save-settings');
 
     const videoDetected = document.getElementById('video-detected');
@@ -67,9 +68,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     let activeTabId = null;
 
     // ─── Load Settings ───
-    const settings = await chrome.storage.sync.get(['backendUrl', 'frameInterval']);
+    const settings = await chrome.storage.sync.get(['backendUrl', 'frameInterval', 'apiKey']);
     backendUrlInput.value = settings.backendUrl || 'https://lecture-notes-pipeline.onrender.com/';
     frameIntervalInput.value = settings.frameInterval || 30;
+    if (apiKeyInput) {
+        apiKeyInput.value = settings.apiKey || '';
+    }
 
     // ─── Settings Toggle ───
     settingsToggle.addEventListener('click', () => {
@@ -83,7 +87,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         await chrome.storage.sync.set({
             backendUrl: url,
-            frameInterval: parseInt(frameIntervalInput.value) || 30
+            frameInterval: parseInt(frameIntervalInput.value) || 30,
+            apiKey: apiKeyInput ? apiKeyInput.value.trim() : ''
         });
 
         settingsPanel.classList.add('hidden');
@@ -403,12 +408,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }))
             };
 
+            const { apiKey = '' } = await chrome.storage.sync.get(['apiKey']);
             const apiUrl = `${backendUrl}api/generate-from-capture`;
             const response = await fetch(apiUrl, {
                 method: 'POST',
                 headers: { 
                     'Content-Type': 'application/json',
-                    'X-API-Key': 'default_secret_key'
+                    'X-API-Key': apiKey
                 },
                 body: JSON.stringify(payload)
             });
@@ -427,7 +433,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // ── Step 4: Poll for Generation Result ──
             setStep('generate', 'active', 'Processing...');
 
-            const result = await pollJobStatus(backendUrl, jobId, false);
+            const result = await pollJobStatus(backendUrl, jobId, false, apiKey);
 
             if (result.status === 'completed') {
                 setStep('generate', 'done', 'Complete');
@@ -495,12 +501,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 throw new Error('Backend URL is not configured. Open settings and enter your Render URL.');
             }
 
+            const { apiKey = '' } = await chrome.storage.sync.get(['apiKey']);
             // POST to api/generate with URL + cookies
             const response = await fetch(`${backendUrl}api/generate`, {
                 method: 'POST',
                 headers: { 
                     'Content-Type': 'application/json',
-                    'X-API-Key': 'default_secret_key'
+                    'X-API-Key': apiKey
                 },
                 body: JSON.stringify({
                     url: currentVideoInfo.url,
@@ -521,7 +528,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // ── Step 2: Poll status ──
             setStep('generate', 'active', 'Processing...');
-            const result = await pollJobStatus(backendUrl, jobId, true); // true for isServerFlow
+            const result = await pollJobStatus(backendUrl, jobId, true, apiKey); // true for isServerFlow
 
             if (result.status === 'completed') {
                 setStep('generate', 'done', 'Complete');
@@ -591,7 +598,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // ─── Poll Job Status ───
-    async function pollJobStatus(backendUrl, jobId, isServerFlow = false) {
+    async function pollJobStatus(backendUrl, jobId, isServerFlow = false, apiKey = '') {
         const pollInterval = 5000; // 5 seconds
         const maxAttempts = 360;   // 30 minutes max
 
@@ -601,7 +608,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 const response = await fetch(`${backendUrl}api/status/${jobId}`, {
                     headers: {
-                        'X-API-Key': 'default_secret_key'
+                        'X-API-Key': apiKey
                     }
                 });
                 if (!response.ok) continue;

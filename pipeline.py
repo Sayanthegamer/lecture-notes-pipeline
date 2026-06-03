@@ -9,9 +9,11 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 import cv2
+import logging
 
 # Load environment variables
 load_dotenv()
+logger = logging.getLogger("lecture_notes_pipeline")
 
 def timestamp_to_seconds(ts_str):
     """
@@ -71,7 +73,7 @@ def extract_lecture_keyframes(video_path, output_dir, interval_seconds=45):
             "-ss", str(time_sec),
             "-i", video_path,
             "-vframes", "1",
-            "-vf", "scale=854:480",
+            "-vf", "scale=854:480:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-q:v", "2",
             output_file
         ]
@@ -168,7 +170,7 @@ def download_youtube_video(url, job_id, workspace_dir, cookies_file=None):
     Downloads a video from YouTube using yt-dlp with a multi-step fallback mechanism
     to capture subtitles and bypass 429 rate limit blocks on both local machines and servers.
     """
-    print(f"--- Step 0: Downloading video from YouTube ---")
+    print("--- Step 0: Downloading video from YouTube ---")
     video_output_path = os.path.join(workspace_dir, f"lecture_video_{job_id}.mp4")
 
     # Define standard format/output options to avoid repeating
@@ -263,11 +265,13 @@ def run_pipeline(video_path, job_id, workspace_dir, output_notes_path="lecture_n
     video_duration_sec = frame_count / fps
     cap.release()
     
-    print(f"Video detected: {video_path}")
-    print(f"Duration: {format_time(video_duration_sec)} ({video_duration_sec:.1f} seconds)")
+    print(f"[{job_id}] Video detected: {video_path}")
+    print(f"[{job_id}] Duration: {format_time(video_duration_sec)} ({video_duration_sec:.1f} seconds)")
+    print(f"[{job_id}] Running pipeline with threshold={threshold} and cooldown_seconds={cooldown_seconds}")
 
     # 2. Extract Keyframes (all at once to run scanning loop only once)
-    temp_img_dir = workspace_dir
+    temp_img_dir = os.path.join(workspace_dir, "keyframes")
+    os.makedirs(temp_img_dir, exist_ok=True)
             
     num_frames = extract_lecture_keyframes(video_path, temp_img_dir, interval_seconds=cooldown_seconds)
     if num_frames == 0:
@@ -469,11 +473,15 @@ def run_pipeline(video_path, job_id, workspace_dir, output_notes_path="lecture_n
         finally:
             # Cleanup temp files for this chunk
             if audio_file_path and os.path.exists(audio_file_path):
-                try: os.remove(audio_file_path)
-                except: pass
+                try:
+                    os.remove(audio_file_path)
+                except OSError as e:
+                    logger.warning(f"Failed to remove audio file {audio_file_path}: {e}")
             if uploaded_audio:
-                try: client.files.delete(name=uploaded_audio.name)
-                except: pass
+                try:
+                    client.files.delete(name=uploaded_audio.name)
+                except Exception as e:
+                    logger.warning(f"Failed to delete uploaded audio file {uploaded_audio.name} from Gemini API: {e}")
 
         # Move to next chunk
         chunk_start = chunk_end
@@ -1259,4 +1267,11 @@ if __name__ == "__main__":
             print("Error: YouTube video download failed. Aborting.")
             sys.exit(1)
             
-    run_pipeline(vid_file, job_id, workspace_dir, out_notes, thresh, cooldown)
+    run_pipeline(
+        video_path=vid_file,
+        job_id=job_id,
+        workspace_dir=workspace_dir,
+        output_notes_path=out_notes,
+        threshold=thresh,
+        cooldown_seconds=cooldown
+    )

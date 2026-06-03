@@ -4,6 +4,8 @@ import sys
 import base64
 import sqlite3
 import datetime
+import contextlib
+import logging
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -12,13 +14,23 @@ from pydantic import BaseModel
 import pipeline
 import shutil
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("lecture_notes_scribe")
+
 app = FastAPI(title="Lecture Notes Scribe API")
 
 # Setup API Key Security
-API_KEY = os.getenv("API_KEY", "default_secret_key")
+# NOTE: The same API_KEY must be configured identically on the client (popup.js) and server in production.
+API_KEY = os.getenv("API_KEY", "REQUIRE_ENV_API_KEY")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
 
 def get_api_key(api_key_header: str = Security(api_key_header)):
+    if API_KEY == "REQUIRE_ENV_API_KEY":
+        raise HTTPException(
+            status_code=500,
+            detail="API_KEY environment variable is not configured on the server."
+        )
     if api_key_header == API_KEY:
         return api_key_header
     raise HTTPException(status_code=403, detail="Could not validate API KEY")
@@ -37,27 +49,30 @@ os.makedirs("notes_media", exist_ok=True)
 app.mount("/notes_media", StaticFiles(directory="notes_media"), name="notes_media")
 
 # Setup SQLite Database
+@contextlib.contextmanager
 def get_db_connection():
-    conn = sqlite3.connect("jobs.db", timeout=30.0)
+    conn = sqlite3.connect("jobs.db", timeout=30.0, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def init_db():
-    conn = get_db_connection()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS jobs (
-            job_id TEXT PRIMARY KEY,
-            status TEXT,
-            progress INTEGER,
-            message TEXT,
-            markdown TEXT,
-            html TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY,
+                status TEXT,
+                progress INTEGER,
+                message TEXT,
+                markdown TEXT,
+                html TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
 
 init_db()
 
@@ -75,28 +90,28 @@ class CaptureJobRequest(BaseModel):
     transcript: str
     frames: list[CaptureFrame] = []
 
-def update_job_in_db(job_id: str, status: str = None, progress: int = None, message: str = None, markdown: str = None, html: str = None):
-    conn = get_db_connection()
-    
-    # Fetch current values
-    cursor = conn.execute("SELECT status, progress, message, markdown, html FROM jobs WHERE job_id = ?", (job_id,))
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return
-        
-    new_status = status if status is not None else row["status"]
-    new_progress = progress if progress is not None else row["progress"]
-    new_message = message if message is not None else row["message"]
-    new_markdown = markdown if markdown is not None else row["markdown"]
-    new_html = html if html is not None else row["html"]
-    
-    conn.execute(
-        "UPDATE jobs SET status = ?, progress = ?, message = ?, markdown = ?, html = ? WHERE job_id = ?",
-        (new_status, new_progress, new_message, new_markdown, new_html, job_id)
-    )
-    conn.commit()
-    conn.close()
+def update_job_in_db(
+    job_id: str,
+    status: str | None = None,
+    progress: int | None = None,
+    message: str | None = None,
+    markdown: str | None = None,
+    html: str | None = None
+):
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE jobs
+            SET status = COALESCE(?, status),
+                progress = COALESCE(?, progress),
+                message = COALESCE(?, message),
+                markdown = COALESCE(?, markdown),
+                html = COALESCE(?, html)
+            WHERE job_id = ?
+            """,
+            (status, progress, message, markdown, html, job_id)
+        )
+        conn.commit()
 
 def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = None):
     def update_progress(progress_val, message_text):
@@ -106,7 +121,7 @@ def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = 
     workspace_dir = f"./tmp/lecture_pipeline_{job_id}"
     os.makedirs(workspace_dir, exist_ok=True)
     
-    cookies_file = os.path.join(workspace_dir, f"cookies.txt") if cookies_text else None
+    cookies_file = os.path.join(workspace_dir, "cookies.txt") if cookies_text else None
     
     try:
         # Write cookies if provided
@@ -167,8 +182,8 @@ def run_pipeline_task(job_id: str, url: str, base_url: str, cookies_text: str = 
         if os.path.exists(workspace_dir):
             try:
                 shutil.rmtree(workspace_dir)
-            except Exception as e:
-                print(f"Warning: Failed to cleanup workspace {workspace_dir}: {e}")
+            except OSError as e:
+                logger.warning(f"Failed to cleanup workspace {workspace_dir}: {e}")
 
 def run_capture_pipeline_task(job_id: str, url: str, base_url: str, transcript: str, workspace_dir: str):
     def update_progress(progress_val, message_text):
@@ -215,7 +230,8 @@ def run_capture_pipeline_task(job_id: str, url: str, base_url: str, transcript: 
         if os.path.exists(workspace_dir):
             try:
                 shutil.rmtree(workspace_dir)
-            except: pass
+            except OSError as e:
+                logger.warning(f"Failed to cleanup workspace {workspace_dir}: {e}")
 
 
 @app.post("/api/generate", dependencies=[Depends(get_api_key)])
@@ -224,13 +240,12 @@ def generate_notes(request: JobRequest, background_tasks: BackgroundTasks, fasta
     base_url = str(fastapi_req.base_url)
     
     # Initialize job in DB
-    conn = get_db_connection()
-    conn.execute(
-        "INSERT INTO jobs (job_id, status, progress, message) VALUES (?, ?, ?, ?)",
-        (job_id, "processing", 10, "Downloading video from YouTube...")
-    )
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (job_id, status, progress, message) VALUES (?, ?, ?, ?)",
+            (job_id, "processing", 10, "Downloading video from YouTube...")
+        )
+        conn.commit()
     
     background_tasks.add_task(run_pipeline_task, job_id, request.url, base_url, request.cookies)
     
@@ -245,26 +260,30 @@ def generate_notes_from_capture(request: CaptureJobRequest, background_tasks: Ba
     workspace_dir = f"./tmp/lecture_pipeline_{job_id}"
     os.makedirs(workspace_dir, exist_ok=True)
     
-    for frame in request.frames:
-        try:
+    try:
+        for frame in request.frames:
             frame_data = base64.b64decode(frame.data)
             frame_path = os.path.join(workspace_dir, frame.filename)
             with open(frame_path, "wb") as f:
                 f.write(frame_data)
-        except Exception as e:
-            print(f"Warning: Failed to save frame {frame.filename}: {e}")
-    
-    frame_count = len([f for f in os.listdir(workspace_dir) if f.endswith('.jpg')])
-    print(f"[Capture] Received {frame_count} keyframes + transcript for {request.url}")
-    
-    # Initialize job in DB
-    conn = get_db_connection()
-    conn.execute(
-        "INSERT INTO jobs (job_id, status, progress, message) VALUES (?, ?, ?, ?)",
-        (job_id, "processing", 20, "Processing captured keyframes and transcript...")
-    )
-    conn.commit()
-    conn.close()
+        
+        frame_count = len([f for f in os.listdir(workspace_dir) if f.endswith('.jpg')])
+        logger.info(f"[Capture] Received {frame_count} keyframes + transcript for {request.url}")
+        
+        # Initialize job in DB
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO jobs (job_id, status, progress, message) VALUES (?, ?, ?, ?)",
+                (job_id, "processing", 20, "Processing captured keyframes and transcript...")
+            )
+            conn.commit()
+    except Exception as e:
+        if os.path.exists(workspace_dir):
+            try:
+                shutil.rmtree(workspace_dir)
+            except OSError as cleanup_err:
+                logger.warning(f"Failed to cleanup workspace {workspace_dir} on initialization failure: {cleanup_err}")
+        raise HTTPException(status_code=500, detail=f"Failed to initialize job: {str(e)}")
     
     background_tasks.add_task(
         run_capture_pipeline_task, job_id, request.url, base_url, request.transcript, workspace_dir
@@ -274,15 +293,12 @@ def generate_notes_from_capture(request: CaptureJobRequest, background_tasks: Ba
 
 @app.get("/api/status/{job_id}", dependencies=[Depends(get_api_key)])
 def get_status(job_id: str):
-    conn = get_db_connection()
-    cursor = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    if not row:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    return dict(row)
+    with get_db_connection() as conn:
+        cursor = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return dict(row)
 
 app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
