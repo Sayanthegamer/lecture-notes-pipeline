@@ -67,10 +67,11 @@ def extract_lecture_keyframes(video_path, output_dir, interval_seconds=45):
             "ffmpeg", "-y",
             "-nostdin",
             "-loglevel", "error",
+            "-threads", "1",
             "-ss", str(time_sec),
             "-i", video_path,
             "-vframes", "1",
-            "-vf", "scale=1280:-1",
+            "-vf", "scale=854:480",
             "-q:v", "2",
             output_file
         ]
@@ -143,6 +144,7 @@ def extract_audio_slice(video_path, audio_output_path, start_sec, duration_sec):
     command = [
         "ffmpeg", "-y",
         "-nostdin",
+        "-threads", "1",
         "-ss", str(start_sec),             # Seek start position
         "-t", str(duration_sec),           # Duration to extract
         "-i", video_path,
@@ -161,26 +163,22 @@ def extract_audio_slice(video_path, audio_output_path, start_sec, duration_sec):
         return False
 
 
-def download_youtube_video(url, cookies_file=None):
+def download_youtube_video(url, job_id, workspace_dir, cookies_file=None):
     """
     Downloads a video from YouTube using yt-dlp with a multi-step fallback mechanism
     to capture subtitles and bypass 429 rate limit blocks on both local machines and servers.
     """
     print(f"--- Step 0: Downloading video from YouTube ---")
-    video_output_path = "lecture_video.mp4"
-    
-    # Cleanup any old downloaded files matching 'lecture_video.*'
-    for f in glob.glob("lecture_video.*"):
-        try: os.remove(f)
-        except: pass
+    video_output_path = os.path.join(workspace_dir, f"lecture_video_{job_id}.mp4")
 
     # Define standard format/output options to avoid repeating
     common_args = [
+        "--no-cache-dir",
         "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
         "--merge-output-format", "mp4",
         "--remux-video", "mp4",
         "--remote-components", "ejs:github",
-        "-o", "lecture_video.%(ext)s"
+        "-o", os.path.join(workspace_dir, f"lecture_video_{job_id}.%(ext)s")
     ]
 
     # Prepend cookies file if provided
@@ -238,13 +236,13 @@ def download_youtube_video(url, cookies_file=None):
         if os.path.exists(video_output_path):
             return video_output_path
         # Return whatever video format it merged to (mkv, webm, mp4)
-        for f in glob.glob("lecture_video.*"):
+        for f in glob.glob(os.path.join(workspace_dir, f"lecture_video_{job_id}.*")):
             if f.endswith(('.mp4', '.mkv', '.webm')):
                 return f
     return None
 
 
-def run_pipeline(video_path, output_notes_path="lecture_notes.md", threshold=0.10, cooldown_seconds=30, progress_callback=None):
+def run_pipeline(video_path, job_id, workspace_dir, output_notes_path="lecture_notes.md", threshold=0.10, cooldown_seconds=30, progress_callback=None):
     start_time = time.time()
     
     # Check Gemini API Key
@@ -269,10 +267,7 @@ def run_pipeline(video_path, output_notes_path="lecture_notes.md", threshold=0.1
     print(f"Duration: {format_time(video_duration_sec)} ({video_duration_sec:.1f} seconds)")
 
     # 2. Extract Keyframes (all at once to run scanning loop only once)
-    temp_img_dir = "./temp_keyframes"
-    if os.path.exists(temp_img_dir):
-        for f in glob.glob(os.path.join(temp_img_dir, "*")):
-            os.remove(f)
+    temp_img_dir = workspace_dir
             
     num_frames = extract_lecture_keyframes(video_path, temp_img_dir, interval_seconds=cooldown_seconds)
     if num_frames == 0:
@@ -361,7 +356,7 @@ def run_pipeline(video_path, output_notes_path="lecture_notes.md", threshold=0.1
         if sub_file:
             transcript_text = parse_subtitles_for_range(sub_file, chunk_start, chunk_end)
         else:
-            audio_file_path = f"./temp_slice_{chunk_index}.mp3"
+            audio_file_path = os.path.join(workspace_dir, f"temp_slice_{chunk_index}.mp3")
             print(f"Extracting audio segment ({format_time(chunk_start)} to {format_time(chunk_end)})...")
             if not extract_audio_slice(video_path, audio_file_path, chunk_start, duration_to_extract):
                 print(f"Skipping segment {chunk_index} due to FFmpeg failure.")
@@ -490,13 +485,7 @@ def run_pipeline(video_path, output_notes_path="lecture_notes.md", threshold=0.1
             time.sleep(rate_limit_delay)
 
     # 5. Final Workspace Cleanup
-    print("\n--- Pipeline execution complete. Cleaning up workspace ---")
-    if os.path.exists(temp_img_dir):
-        for f in glob.glob(os.path.join(temp_img_dir, "*")):
-            try: os.remove(f)
-            except: pass
-        try: os.rmdir(temp_img_dir)
-        except: pass
+    print("\n--- Pipeline execution complete. Workspace cleanup delegated to caller ---")
         
     elapsed = time.time() - start_time
     print(f"All chunks compiled! Output file: {output_notes_path}")
@@ -1257,13 +1246,17 @@ if __name__ == "__main__":
     thresh = float(sys.argv[3]) if len(sys.argv) > 3 else 0.10
     cooldown = int(sys.argv[4]) if len(sys.argv) > 4 else 30
     
+    job_id = "manual_run"
+    workspace_dir = f"./tmp/lecture_pipeline_{job_id}"
+    os.makedirs(workspace_dir, exist_ok=True)
+    
     # Auto-detect if input is a YouTube URL
     if vid_file.startswith(('http://', 'https://', 'www.', 'youtu.be')):
-        downloaded_path = download_youtube_video(vid_file)
+        downloaded_path = download_youtube_video(vid_file, job_id, workspace_dir)
         if downloaded_path:
             vid_file = downloaded_path
         else:
             print("Error: YouTube video download failed. Aborting.")
             sys.exit(1)
             
-    run_pipeline(vid_file, out_notes, thresh, cooldown)
+    run_pipeline(vid_file, job_id, workspace_dir, out_notes, thresh, cooldown)

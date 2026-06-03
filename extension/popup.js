@@ -406,7 +406,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             const apiUrl = `${backendUrl}api/generate-from-capture`;
             const response = await fetch(apiUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'X-API-Key': 'default_secret_key'
+                },
                 body: JSON.stringify(payload)
             });
 
@@ -495,7 +498,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             // POST to api/generate with URL + cookies
             const response = await fetch(`${backendUrl}api/generate`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'X-API-Key': 'default_secret_key'
+                },
                 body: JSON.stringify({
                     url: currentVideoInfo.url,
                     cookies: cookiesText || null
@@ -593,7 +599,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             await new Promise(r => setTimeout(r, pollInterval));
 
             try {
-                const response = await fetch(`${backendUrl}api/status/${jobId}`);
+                const response = await fetch(`${backendUrl}api/status/${jobId}`, {
+                    headers: {
+                        'X-API-Key': 'default_secret_key'
+                    }
+                });
                 if (!response.ok) continue;
 
                 const data = await response.json();
