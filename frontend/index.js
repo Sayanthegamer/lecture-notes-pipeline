@@ -42,11 +42,9 @@ document.addEventListener('DOMContentLoaded', () => {
         youtubeCookiesInput.value = savedCookies;
     }
 
-    // Load saved API key
-    const savedApiKey = localStorage.getItem('notes_scribe_api_key');
-    if (savedApiKey && apiKeyInput) {
-        apiKeyInput.value = savedApiKey;
-    }
+    // Do not persist API keys in localStorage (sensitive data).
+    // Remove any previously stored API key from older versions.
+    localStorage.removeItem('notes_scribe_api_key');
 
     // Save URL when changed
     backendUrlInput.addEventListener('change', () => {
@@ -65,12 +63,8 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Save API key when changed
-    if (apiKeyInput) {
-        apiKeyInput.addEventListener('change', () => {
-            localStorage.setItem('notes_scribe_api_key', apiKeyInput.value.trim());
-        });
-    }
+    // API key is intentionally kept in-memory only for this session.
+    // (No localStorage persistence.)
 
     // Get cleaned base API url
     function getApiBase() {
