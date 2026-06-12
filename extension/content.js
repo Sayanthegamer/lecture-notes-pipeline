@@ -331,7 +331,7 @@
         for (const cue of cues) {
             transcript.push({
                 start: cue.startTime,
-                text: cue.text.replace(/<[^>]+>/g, '').trim(),
+                text: (cue.text || '').replace(/[<>]/g, '').trim(),
                 timestamp: formatTime(cue.startTime)
             });
         }
