@@ -179,7 +179,7 @@ async def download_youtube_video(url, job_id, workspace_dir, cookies_file=None):
 
     common_args = [
         "--no-cache-dir",
-        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
+        "-f", "bv*[vcodec^=avc][height<=720]+ba[ext=m4a] / bv*[ext=mp4][height<=720]+ba[ext=m4a] / b[ext=mp4] / best",
         "--merge-output-format", "mp4",
         "--remux-video", "mp4",
         "--remote-components", "ejs:github",
